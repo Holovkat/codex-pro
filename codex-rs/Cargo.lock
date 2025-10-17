@@ -1129,6 +1129,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-async-utils"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "pretty_assertions",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "codex-backend-client"
 version = "0.42.16"
 dependencies = [
@@ -1272,6 +1282,7 @@ dependencies = [
  "codex-agentic-core",
  "codex-app-server-protocol",
  "codex-apply-patch",
+ "codex-async-utils",
  "codex-file-search",
  "codex-mcp-client",
  "codex-otel",
@@ -1313,6 +1324,7 @@ dependencies = [
  "similar",
  "strum_macros 0.27.2",
  "tempfile",
+ "test-log",
  "textwrap 0.16.2",
  "thiserror 2.0.16",
  "time",
@@ -7108,6 +7120,28 @@ name = "termtree"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f50febec83f5ee1df3015341d8bd429f2d1cc62bcba7ea2076759d315084683"
+
+[[package]]
+name = "test-log"
+version = "0.2.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e33b98a582ea0be1168eba097538ee8dd4bbe0f2b01b22ac92ea30054e5be7b"
+dependencies = [
+ "env_logger",
+ "test-log-macros",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "test-log-macros"
+version = "0.2.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "451b374529930d7601b1eef8d32bc79ae870b6079b069401709c2a8bf9e75f36"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.104",
+]
 
 [[package]]
 name = "textwrap"
