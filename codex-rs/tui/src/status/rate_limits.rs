@@ -1,12 +1,10 @@
 use super::helpers::format_reset_timestamp;
 use chrono::DateTime;
-use chrono::Duration as ChronoDuration;
 use chrono::Local;
 use codex_common::rate_limits::RateLimitWindowKind;
 use codex_common::rate_limits::resolve_window_kind;
 use codex_core::protocol::RateLimitSnapshot;
 use codex_core::protocol::RateLimitWindow;
-use std::convert::TryFrom;
 
 const STATUS_LIMIT_BAR_SEGMENTS: usize = 20;
 const STATUS_LIMIT_BAR_FILLED: &str = "█";
@@ -40,9 +38,10 @@ impl RateLimitWindowDisplay {
         fallback_kind: RateLimitWindowKind,
     ) -> Self {
         let resets_at = window
-            .resets_in_seconds
-            .and_then(|seconds| i64::try_from(seconds).ok())
-            .and_then(|secs| captured_at.checked_add_signed(ChronoDuration::seconds(secs)))
+            .resets_at
+            .as_deref()
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .map(|dt| dt.with_timezone(&Local))
             .map(|dt| format_reset_timestamp(dt, captured_at));
 
         Self {
