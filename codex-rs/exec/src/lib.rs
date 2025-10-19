@@ -194,6 +194,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         include_view_image_tool: None,
         show_raw_agent_reasoning: oss_active.then_some(true),
         tools_web_search_request: None,
+        additional_writable_roots: Vec::new(),
     };
 
     if custom_provider_selected.is_none() && resolution.provider_override.is_none() {

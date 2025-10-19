@@ -154,6 +154,7 @@ pub async fn run_main(
 
     // canonicalize the cwd
     let cwd = cli.cwd.clone().map(|p| p.canonicalize().unwrap_or(p));
+    let additional_dirs = cli.add_dir.clone();
 
     let custom_provider_selected = resolution
         .provider_override
@@ -176,6 +177,7 @@ pub async fn run_main(
         include_view_image_tool: None,
         show_raw_agent_reasoning: oss_active.then_some(true),
         tools_web_search_request: cli.web_search.then_some(true),
+        additional_writable_roots: additional_dirs,
     };
 
     if custom_provider_selected.is_none() && resolution.provider_override.is_none() {
