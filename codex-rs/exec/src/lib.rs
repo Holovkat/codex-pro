@@ -85,6 +85,10 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         config_overrides,
     } = cli;
 
+    if include_plan_tool.is_some() {
+        eprintln!("include-plan-tool is deprecated. Plan tool is now enabled by default.");
+    }
+
     // Determine the prompt source (parent or subcommand) and read from stdin if needed.
     let prompt_arg = match &command {
         // Allow prompt before the subcommand by falling back to the parent-level prompt
@@ -190,7 +194,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         model_provider: resolution.provider_override.clone(),
         codex_linux_sandbox_exe,
         base_instructions: Some(base_prompt.clone()),
-        include_plan_tool: Some(include_plan_tool && resolution.include_plan_tool),
+        include_plan_tool: Some(include_plan_tool.unwrap_or(true)),
         include_apply_patch_tool: None,
         include_view_image_tool: None,
         show_raw_agent_reasoning: oss_active.then_some(true),
