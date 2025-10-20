@@ -1090,9 +1090,11 @@ name = "codex-app-server-protocol"
 version = "0.47.0"
 dependencies = [
  "anyhow",
+ "clap",
  "codex-protocol",
  "paste",
  "pretty_assertions",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "strum_macros 0.27.2",
@@ -1576,6 +1578,7 @@ dependencies = [
  "icu_locale_core",
  "mcp-types",
  "mime_guess",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "serde_with",
@@ -4274,6 +4277,7 @@ dependencies = [
 name = "mcp-types"
 version = "0.47.0"
 dependencies = [
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "ts-rs",
