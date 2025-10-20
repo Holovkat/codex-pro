@@ -2,6 +2,19 @@
 
 Codex Agentic builds on the upstream OpenAI Codex CLI to deliver a customised Rust workspace targeting version `0.46.0`. It layers semantic indexing, provider management, and agentic command flows on top of the maintained Codex core while remaining compatible with upstream tooling.
 
+We provide Codex CLI as a standalone, native executable to ensure a zero-dependency install.
+
+## Installing Codex
+
+Today, the easiest way to install Codex is via `npm`:
+
+```shell
+npm i -g @openai/codex
+codex
+```
+
+You can also install via Homebrew (`brew install --cask codex`) or download a platform-specific release directly from our [GitHub Releases](https://github.com/openai/codex/releases).
+
 ## Documentation quickstart
 
 - First run with Codex? Follow the walkthrough in [`docs/getting-started.md`](../docs/getting-started.md) for prompts, keyboard shortcuts, and session management.
@@ -87,10 +100,6 @@ codex completion fish
 - Diff exports for upstream reconciliation accompany the checklist (see the “Diff archives” task group in the same document) and land under `/Users/tonyholovka/workspace/codex-pro/designs/codex-pro/codex-46/diffs/`.
 - When preparing releases, follow the checklist gates (lint/build/test records, artifact snapshots) and document smoke results alongside diff references before tagging downstream releases.
 
-
-
-=======
->>>>>>> 2d9ee9dbe (docs: align sandbox defaults, dedupe sections and improve getting started guide (#5357))
 ### Experimenting with the Codex Sandbox
 
 To test to see what happens when a command is run under the sandbox provided by Codex, we provide the following subcommands in Codex CLI:
@@ -132,4 +141,3 @@ This folder is the root of a Cargo workspace. It contains quite a bit of experim
 - [`exec/`](./exec) "headless" CLI for use in automation.
 - [`tui/`](./tui) CLI that launches a fullscreen TUI built with [Ratatui](https://ratatui.rs/).
 - [`cli/`](./cli) CLI multitool that provides the aforementioned CLIs via subcommands.
->>>>>>> 4f46360aa (feat: add --add-dir flag for extra writable roots (#5335))
