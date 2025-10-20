@@ -551,6 +551,33 @@ mod tests {
     }
 
     #[test]
+    fn exec_history_cell_wraps_with_two_space_indent() {
+        let command = vec![
+            "/bin/zsh".into(),
+            "-lc".into(),
+            "git add tui/src/render/mod.rs tui/src/render/renderable.rs".into(),
+        ];
+        let cell = history_cell::new_approval_decision_cell(command, ReviewDecision::Approved);
+        let lines = cell.display_lines(28);
+        let rendered: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        let expected = vec![
+            "✔ You approved codex to run".to_string(),
+            "  git add tui/src/render/".to_string(),
+            "  mod.rs tui/src/render/".to_string(),
+            "  renderable.rs this time".to_string(),
+        ];
+        assert_eq!(rendered, expected);
+    }
+
+    #[test]
     fn enter_sets_last_selected_index_without_dismissing() {
         let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx_raw);
