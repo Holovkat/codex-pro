@@ -499,6 +499,16 @@ pub fn write_global_mcp_servers(
                 entry["tool_timeout_sec"] = toml_edit::value(timeout.as_secs_f64());
             }
 
+            if let Some(enabled_tools) = &config.enabled_tools {
+                entry["enabled_tools"] =
+                    TomlItem::Value(enabled_tools.iter().collect::<TomlArray>().into());
+            }
+
+            if let Some(disabled_tools) = &config.disabled_tools {
+                entry["disabled_tools"] =
+                    TomlItem::Value(disabled_tools.iter().collect::<TomlArray>().into());
+            }
+
             doc["mcp_servers"][name.as_str()] = TomlItem::Table(entry);
         }
     }
@@ -2032,6 +2042,8 @@ approve_all = true
                 enabled: true,
                 startup_timeout_sec: Some(Duration::from_secs(3)),
                 tool_timeout_sec: Some(Duration::from_secs(5)),
+                enabled_tools: None,
+                disabled_tools: None,
             },
         );
 
@@ -2168,6 +2180,8 @@ bearer_token = "secret"
                 enabled: true,
                 startup_timeout_sec: None,
                 tool_timeout_sec: None,
+                enabled_tools: None,
+                disabled_tools: None,
             },
         )]);
 
@@ -2230,6 +2244,8 @@ ZIG_VAR = "3"
                 enabled: true,
                 startup_timeout_sec: None,
                 tool_timeout_sec: None,
+                enabled_tools: None,
+                disabled_tools: None,
             },
         )]);
 
@@ -2272,6 +2288,8 @@ ZIG_VAR = "3"
                 enabled: true,
                 startup_timeout_sec: None,
                 tool_timeout_sec: None,
+                enabled_tools: None,
+                disabled_tools: None,
             },
         )]);
 
@@ -2313,6 +2331,8 @@ ZIG_VAR = "3"
                 enabled: true,
                 startup_timeout_sec: Some(Duration::from_secs(2)),
                 tool_timeout_sec: None,
+                enabled_tools: None,
+                disabled_tools: None,
             },
         )]);
 
@@ -2370,6 +2390,8 @@ startup_timeout_sec = 2.0
                 enabled: true,
                 startup_timeout_sec: Some(Duration::from_secs(2)),
                 tool_timeout_sec: None,
+                enabled_tools: None,
+                disabled_tools: None,
             },
         )]);
         write_global_mcp_servers(codex_home.path(), &servers)?;
@@ -2439,6 +2461,8 @@ X-Auth = "DOCS_AUTH"
                 enabled: true,
                 startup_timeout_sec: Some(Duration::from_secs(2)),
                 tool_timeout_sec: None,
+                enabled_tools: None,
+                disabled_tools: None,
             },
         )]);
 
@@ -2460,6 +2484,8 @@ X-Auth = "DOCS_AUTH"
                 enabled: true,
                 startup_timeout_sec: None,
                 tool_timeout_sec: None,
+                enabled_tools: None,
+                disabled_tools: None,
             },
         );
         write_global_mcp_servers(codex_home.path(), &servers)?;
@@ -2519,6 +2545,8 @@ url = "https://example.com/mcp"
                     enabled: true,
                     startup_timeout_sec: Some(Duration::from_secs(2)),
                     tool_timeout_sec: None,
+                    enabled_tools: None,
+                    disabled_tools: None,
                 },
             ),
             (
@@ -2534,6 +2562,8 @@ url = "https://example.com/mcp"
                     enabled: true,
                     startup_timeout_sec: None,
                     tool_timeout_sec: None,
+                    enabled_tools: None,
+                    disabled_tools: None,
                 },
             ),
         ]);
@@ -2608,6 +2638,8 @@ url = "https://example.com/mcp"
                 enabled: false,
                 startup_timeout_sec: None,
                 tool_timeout_sec: None,
+                enabled_tools: None,
+                disabled_tools: None,
             },
         )]);
 
@@ -2623,6 +2655,49 @@ url = "https://example.com/mcp"
         let loaded = load_global_mcp_servers(codex_home.path()).await?;
         let docs = loaded.get("docs").expect("docs entry");
         assert!(!docs.enabled);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_global_mcp_servers_serializes_tool_filters() -> anyhow::Result<()> {
+        let codex_home = TempDir::new()?;
+
+        let servers = BTreeMap::from([(
+            "docs".to_string(),
+            McpServerConfig {
+                transport: McpServerTransportConfig::Stdio {
+                    command: "docs-server".to_string(),
+                    args: Vec::new(),
+                    env: None,
+                    env_vars: Vec::new(),
+                    cwd: None,
+                },
+                enabled: true,
+                startup_timeout_sec: None,
+                tool_timeout_sec: None,
+                enabled_tools: Some(vec!["allowed".to_string()]),
+                disabled_tools: Some(vec!["blocked".to_string()]),
+            },
+        )]);
+
+        write_global_mcp_servers(codex_home.path(), &servers)?;
+
+        let config_path = codex_home.path().join(CONFIG_TOML_FILE);
+        let serialized = std::fs::read_to_string(&config_path)?;
+        assert!(serialized.contains(r#"enabled_tools = ["allowed"]"#));
+        assert!(serialized.contains(r#"disabled_tools = ["blocked"]"#));
+
+        let loaded = load_global_mcp_servers(codex_home.path()).await?;
+        let docs = loaded.get("docs").expect("docs entry");
+        assert_eq!(
+            docs.enabled_tools.as_ref(),
+            Some(&vec!["allowed".to_string()])
+        );
+        assert_eq!(
+            docs.disabled_tools.as_ref(),
+            Some(&vec!["blocked".to_string()])
+        );
 
         Ok(())
     }
