@@ -19,6 +19,7 @@ use codex_core::AuthManager;
 use codex_core::CodexAuth;
 use codex_core::INTERACTIVE_SESSION_SOURCES;
 use codex_core::RolloutRecorder;
+use codex_core::auth::enforce_login_restrictions;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::ConfigToml;
@@ -253,9 +254,6 @@ pub async fn run_main(
     };
 
     let cli_profile_override = cli.config_profile.clone();
-    let active_profile = cli_profile_override
-        .clone()
-        .or_else(|| config_toml.profile.clone());
 
     let should_show_trust_screen = determine_repo_trust_state(
         &mut config,
@@ -265,6 +263,13 @@ pub async fn run_main(
         cli_profile_override,
     )?;
 
+    #[allow(clippy::print_stderr)]
+    if let Err(err) = enforce_login_restrictions(&config).await {
+        eprintln!("{err}");
+        std::process::exit(1);
+    }
+
+    let active_profile = config.active_profile.clone();
     let log_dir = codex_core::config::log_dir(&config)?;
     std::fs::create_dir_all(&log_dir)?;
     // Open (or create) your log file, appending to it.

@@ -24,6 +24,7 @@ use codex_agentic_core::provider::plan_tool_supported;
 use codex_core::AuthManager;
 use codex_core::ConversationManager;
 use codex_core::NewConversation;
+use codex_core::auth::enforce_login_restrictions;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::OPENAI_DEFAULT_MODEL;
@@ -245,6 +246,11 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
     codex_agentic_core::provider::sanitize_reasoning_overrides(&mut config);
     codex_agentic_core::provider::sanitize_tool_overrides(&mut config);
     apply_overlay_to_config(&mut config, &overlay_prompt);
+
+    if let Err(err) = enforce_login_restrictions(&config).await {
+        eprintln!("{err}");
+        std::process::exit(1);
+    }
 
     let otel = codex_core::otel_init::build_provider(&config, env!("CARGO_PKG_VERSION"));
 
