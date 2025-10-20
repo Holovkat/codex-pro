@@ -78,7 +78,9 @@ use tokio::select;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::time;
 use tracing::warn;
-// use uuid::Uuid;
+
+#[cfg(not(debug_assertions))]
+use crate::history_cell::UpdateAvailableHistoryCell;
 
 const INDEX_STATUS_REFRESH_SECS: u64 = 60;
 const INDEX_TOAST_DURATION_SECS: u64 = 5;
@@ -513,9 +515,14 @@ impl App {
         let index_status = IndexStatusSnapshot::load(&cwd).ok().flatten();
         let settings = settings::global();
         let file_search = FileSearchManager::new(config.cwd.clone(), app_event_tx.clone());
+<<<<<<< HEAD
         let last_index_attempt = index_status
             .as_ref()
             .and_then(|snapshot| snapshot.analytics.last_attempt_ts);
+=======
+        #[cfg(not(debug_assertions))]
+        let upgrade_version = crate::updates::get_upgrade_version(&config);
+>>>>>>> 58159383c (fix terminal corruption that could happen when onboarding and update banner (#5269))
 
         let mut app = Self {
             server: conversation_manager,
@@ -544,6 +551,7 @@ impl App {
             pending_update_action: get_update_action(),
         };
 
+<<<<<<< HEAD
         app.refresh_index_status_line();
 
         spawn_status_refresh(app.app_event_tx.clone());
@@ -553,6 +561,19 @@ impl App {
             app.app_event_tx.clone(),
             Duration::from_secs(INDEX_DELTA_POLL_SECS),
         );
+=======
+        #[cfg(not(debug_assertions))]
+        if let Some(latest_version) = upgrade_version {
+            app.handle_event(
+                tui,
+                AppEvent::InsertHistoryCell(Box::new(UpdateAvailableHistoryCell::new(
+                    latest_version,
+                    crate::updates::get_update_action(),
+                ))),
+            )
+            .await?;
+        }
+>>>>>>> 58159383c (fix terminal corruption that could happen when onboarding and update banner (#5269))
 
         let tui_events = tui.event_stream();
         tokio::pin!(tui_events);

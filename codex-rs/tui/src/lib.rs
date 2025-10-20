@@ -86,6 +86,7 @@ mod terminal_palette;
 mod text_formatting;
 mod tui;
 mod ui_consts;
+<<<<<<< HEAD
 mod version;
 mod wrapping;
 
@@ -389,6 +390,7 @@ async fn run_ratatui_app(
 
     let mut tui = Tui::new(terminal);
 
+<<<<<<< HEAD
     // Show update banner in terminal history (instead of stderr) so it is visible
     // within the TUI scrollback. Building spans keeps styling consistent.
     #[cfg(not(debug_assertions))]
@@ -460,6 +462,26 @@ async fn run_ratatui_app(
         let mut lines = with_border_with_inner_width(content_lines, inner_width);
         lines.push("".into());
         tui.insert_history_lines(lines);
+=======
+    #[cfg(not(debug_assertions))]
+    {
+        use crate::update_prompt::UpdatePromptOutcome;
+
+        let skip_update_prompt = cli.prompt.as_ref().is_some_and(|prompt| !prompt.is_empty());
+        if !skip_update_prompt {
+            match update_prompt::run_update_prompt_if_needed(&mut tui, &initial_config).await? {
+                UpdatePromptOutcome::Continue => {}
+                UpdatePromptOutcome::RunUpdate(action) => {
+                    crate::tui::restore()?;
+                    return Ok(AppExitInfo {
+                        token_usage: codex_core::protocol::TokenUsage::default(),
+                        conversation_id: None,
+                        update_action: Some(action),
+                    });
+                }
+            }
+        }
+>>>>>>> 58159383c (fix terminal corruption that could happen when onboarding and update banner (#5269))
     }
 
     // Initialize high-fidelity session event logging if enabled.
@@ -595,6 +617,7 @@ fn restore() {
         eprintln!(
             "failed to restore terminal. Run `reset` or restart your terminal to recover: {err}"
         );
+<<<<<<< HEAD
     }
 }
 
@@ -642,6 +665,8 @@ impl UpdateAction {
     pub fn command_str(&self) -> String {
         let (cmd, args) = self.command_args();
         format!("{} {}", cmd, args.join(" "))
+=======
+>>>>>>> 58159383c (fix terminal corruption that could happen when onboarding and update banner (#5269))
     }
 }
 

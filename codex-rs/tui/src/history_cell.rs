@@ -11,7 +11,10 @@ use crate::render::line_utils::line_to_static;
 use crate::render::line_utils::prefix_lines;
 use crate::style::user_message_style;
 use crate::text_formatting::format_and_truncate_tool_result;
+use crate::text_formatting::truncate_text;
 use crate::ui_consts::LIVE_PREFIX_COLS;
+use crate::updates::UpdateAction;
+use crate::version::CODEX_CLI_VERSION;
 use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_line;
 use crate::wrapping::word_wrap_lines;
@@ -263,6 +266,183 @@ impl HistoryCell for PlainHistoryCell {
     }
 }
 
+<<<<<<< HEAD
+=======
+#[cfg_attr(debug_assertions, allow(dead_code))]
+#[derive(Debug)]
+pub(crate) struct UpdateAvailableHistoryCell {
+    latest_version: String,
+    update_action: Option<UpdateAction>,
+}
+
+#[cfg_attr(debug_assertions, allow(dead_code))]
+impl UpdateAvailableHistoryCell {
+    pub(crate) fn new(latest_version: String, update_action: Option<UpdateAction>) -> Self {
+        Self {
+            latest_version,
+            update_action,
+        }
+    }
+}
+
+impl HistoryCell for UpdateAvailableHistoryCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        use ratatui_macros::line;
+        use ratatui_macros::text;
+        let update_instruction = if let Some(update_action) = self.update_action {
+            line!["Run ", update_action.command_str().cyan(), " to update."]
+        } else {
+            line![
+                "See ",
+                "https://github.com/openai/codex".cyan().underlined(),
+                " for installation options."
+            ]
+        };
+
+        let content = text![
+            line![
+                padded_emoji("✨").bold().cyan(),
+                "Update available!".bold().cyan(),
+                " ",
+                format!("{CODEX_CLI_VERSION} -> {}", self.latest_version).bold(),
+            ],
+            update_instruction,
+            "",
+            "See full release notes:",
+            "https://github.com/openai/codex/releases/latest"
+                .cyan()
+                .underlined(),
+        ];
+
+        let inner_width = content
+            .width()
+            .min(usize::from(width.saturating_sub(4)))
+            .max(1);
+        with_border_with_inner_width(content.lines, inner_width)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct PrefixedWrappedHistoryCell {
+    text: Text<'static>,
+    initial_prefix: Line<'static>,
+    subsequent_prefix: Line<'static>,
+}
+
+impl PrefixedWrappedHistoryCell {
+    pub(crate) fn new(
+        text: impl Into<Text<'static>>,
+        initial_prefix: impl Into<Line<'static>>,
+        subsequent_prefix: impl Into<Line<'static>>,
+    ) -> Self {
+        Self {
+            text: text.into(),
+            initial_prefix: initial_prefix.into(),
+            subsequent_prefix: subsequent_prefix.into(),
+        }
+    }
+}
+
+impl HistoryCell for PrefixedWrappedHistoryCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        if width == 0 {
+            return Vec::new();
+        }
+        let opts = RtOptions::new(width.max(1) as usize)
+            .initial_indent(self.initial_prefix.clone())
+            .subsequent_indent(self.subsequent_prefix.clone());
+        let wrapped = word_wrap_lines(&self.text, opts);
+        let mut out = Vec::new();
+        push_owned_lines(&wrapped, &mut out);
+        out
+    }
+
+    fn desired_height(&self, width: u16) -> u16 {
+        self.display_lines(width).len() as u16
+    }
+}
+
+fn truncate_exec_snippet(full_cmd: &str) -> String {
+    let mut snippet = match full_cmd.split_once('\n') {
+        Some((first, _)) => format!("{first} ..."),
+        None => full_cmd.to_string(),
+    };
+    snippet = truncate_text(&snippet, 80);
+    snippet
+}
+
+fn exec_snippet(command: &[String]) -> String {
+    let full_cmd = strip_bash_lc_and_escape(command);
+    truncate_exec_snippet(&full_cmd)
+}
+
+pub fn new_approval_decision_cell(
+    command: Vec<String>,
+    decision: codex_core::protocol::ReviewDecision,
+) -> Box<dyn HistoryCell> {
+    use codex_core::protocol::ReviewDecision::*;
+
+    let (symbol, summary): (Span<'static>, Vec<Span<'static>>) = match decision {
+        Approved => {
+            let snippet = Span::from(exec_snippet(&command)).dim();
+            (
+                "✔ ".green(),
+                vec![
+                    "You ".into(),
+                    "approved".bold(),
+                    " codex to run ".into(),
+                    snippet,
+                    " this time".bold(),
+                ],
+            )
+        }
+        ApprovedForSession => {
+            let snippet = Span::from(exec_snippet(&command)).dim();
+            (
+                "✔ ".green(),
+                vec![
+                    "You ".into(),
+                    "approved".bold(),
+                    " codex to run ".into(),
+                    snippet,
+                    " every time this session".bold(),
+                ],
+            )
+        }
+        Denied => {
+            let snippet = Span::from(exec_snippet(&command)).dim();
+            (
+                "✗ ".red(),
+                vec![
+                    "You ".into(),
+                    "did not approve".bold(),
+                    " codex to run ".into(),
+                    snippet,
+                ],
+            )
+        }
+        Abort => {
+            let snippet = Span::from(exec_snippet(&command)).dim();
+            (
+                "✗ ".red(),
+                vec![
+                    "You ".into(),
+                    "canceled".bold(),
+                    " the request to run ".into(),
+                    snippet,
+                ],
+            )
+        }
+    };
+
+    Box::new(PrefixedWrappedHistoryCell::new(
+        Line::from(summary),
+        symbol,
+        "  ",
+    ))
+}
+
+>>>>>>> 58159383c (fix terminal corruption that could happen when onboarding and update banner (#5269))
 /// Cyan history cell line showing the current review status.
 pub(crate) fn new_review_status_line(message: String) -> PlainHistoryCell {
     PlainHistoryCell {
