@@ -19,13 +19,13 @@ use codex_core::config_types::ProviderReasoningControls;
 use codex_core::error::CodexErr;
 use codex_core::model_family::find_family_for_model;
 use codex_core::protocol::EventMsg;
-use codex_core::protocol::InputItem;
 use codex_core::protocol::Op;
 use codex_core::protocol::SessionSource;
 use codex_otel::otel_event_manager::OtelEventManager;
 use codex_protocol::ConversationId;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::WebSearchAction;
+use codex_protocol::user_input::UserInput;
 use core_test_support::load_default_config_for_test;
 use core_test_support::load_sse_fixture_with_id;
 use core_test_support::responses;
@@ -265,7 +265,7 @@ async fn resume_includes_initial_messages_and_sends_prior_items() {
     // 2) Submit new input; the request body must include the prior item followed by the new user input.
     codex
         .submit(Op::UserInput {
-            items: vec![InputItem::Text {
+            items: vec![UserInput::Text {
                 text: "hello".into(),
             }],
         })
@@ -337,7 +337,7 @@ async fn includes_conversation_id_and_model_headers_in_request() {
 
     codex
         .submit(Op::UserInput {
-            items: vec![InputItem::Text {
+            items: vec![UserInput::Text {
                 text: "hello".into(),
             }],
         })
@@ -392,7 +392,7 @@ async fn includes_base_instructions_override_in_request() {
 
     codex
         .submit(Op::UserInput {
-            items: vec![InputItem::Text {
+            items: vec![UserInput::Text {
                 text: "hello".into(),
             }],
         })
@@ -452,7 +452,7 @@ async fn chatgpt_auth_sends_correct_request() {
 
     codex
         .submit(Op::UserInput {
-            items: vec![InputItem::Text {
+            items: vec![UserInput::Text {
                 text: "hello".into(),
             }],
         })
@@ -542,7 +542,7 @@ async fn prefers_apikey_when_config_prefers_apikey_even_with_chatgpt_tokens() {
 
     codex
         .submit(Op::UserInput {
-            items: vec![InputItem::Text {
+            items: vec![UserInput::Text {
                 text: "hello".into(),
             }],
         })
@@ -581,7 +581,7 @@ async fn includes_user_instructions_message_in_request() {
 
     codex
         .submit(Op::UserInput {
-            items: vec![InputItem::Text {
+            items: vec![UserInput::Text {
                 text: "hello".into(),
             }],
         })
@@ -798,7 +798,7 @@ async fn token_count_includes_rate_limits_snapshot() {
 
     codex
         .submit(Op::UserInput {
-            items: vec![InputItem::Text {
+            items: vec![UserInput::Text {
                 text: "hello".into(),
             }],
         })
@@ -949,7 +949,7 @@ async fn usage_limit_error_emits_rate_limit_event() -> anyhow::Result<()> {
 
     let submission_id = codex
         .submit(Op::UserInput {
-            items: vec![InputItem::Text {
+            items: vec![UserInput::Text {
                 text: "hello".into(),
             }],
         })
@@ -1019,7 +1019,7 @@ async fn context_window_error_sets_total_tokens_to_model_window() -> anyhow::Res
 
     codex
         .submit(Op::UserInput {
-            items: vec![InputItem::Text {
+            items: vec![UserInput::Text {
                 text: "seed turn".into(),
             }],
         })
@@ -1029,7 +1029,7 @@ async fn context_window_error_sets_total_tokens_to_model_window() -> anyhow::Res
 
     codex
         .submit(Op::UserInput {
-            items: vec![InputItem::Text {
+            items: vec![UserInput::Text {
                 text: "trigger context window".into(),
             }],
         })
@@ -1151,7 +1151,7 @@ async fn azure_overrides_assign_properties_used_for_responses_url() {
 
     codex
         .submit(Op::UserInput {
-            items: vec![InputItem::Text {
+            items: vec![UserInput::Text {
                 text: "hello".into(),
             }],
         })
@@ -1230,7 +1230,7 @@ async fn env_var_overrides_loaded_auth() {
 
     codex
         .submit(Op::UserInput {
-            items: vec![InputItem::Text {
+            items: vec![UserInput::Text {
                 text: "hello".into(),
             }],
         })
@@ -1308,7 +1308,7 @@ async fn history_dedupes_streamed_and_final_messages_across_turns() {
     // Turn 1: user sends U1; wait for completion.
     codex
         .submit(Op::UserInput {
-            items: vec![InputItem::Text { text: "U1".into() }],
+            items: vec![UserInput::Text { text: "U1".into() }],
         })
         .await
         .unwrap();
@@ -1317,7 +1317,7 @@ async fn history_dedupes_streamed_and_final_messages_across_turns() {
     // Turn 2: user sends U2; wait for completion.
     codex
         .submit(Op::UserInput {
-            items: vec![InputItem::Text { text: "U2".into() }],
+            items: vec![UserInput::Text { text: "U2".into() }],
         })
         .await
         .unwrap();
@@ -1326,7 +1326,7 @@ async fn history_dedupes_streamed_and_final_messages_across_turns() {
     // Turn 3: user sends U3; wait for completion.
     codex
         .submit(Op::UserInput {
-            items: vec![InputItem::Text { text: "U3".into() }],
+            items: vec![UserInput::Text { text: "U3".into() }],
         })
         .await
         .unwrap();

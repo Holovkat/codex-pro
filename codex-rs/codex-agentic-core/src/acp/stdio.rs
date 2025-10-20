@@ -23,7 +23,6 @@ use codex_core::protocol::AgentReasoningRawContentDeltaEvent;
 use codex_core::protocol::AgentReasoningRawContentEvent;
 use codex_core::protocol::ErrorEvent;
 use codex_core::protocol::EventMsg;
-use codex_core::protocol::InputItem;
 use codex_core::protocol::McpAuthStatus;
 use codex_core::protocol::McpListToolsResponseEvent;
 use codex_core::protocol::Op;
@@ -35,6 +34,7 @@ use codex_core::protocol::TurnAbortReason;
 use codex_protocol::ConversationId;
 use codex_protocol::plan_tool::StepStatus;
 use codex_protocol::plan_tool::UpdatePlanArgs;
+use codex_protocol::user_input::UserInput;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
@@ -1190,7 +1190,7 @@ impl RuntimeState {
             .ensure_session_conversation(session_id, session_state, writer)
             .await?;
 
-        let items = vec![InputItem::Text {
+        let items = vec![UserInput::Text {
             text: text.to_string(),
         }];
 
