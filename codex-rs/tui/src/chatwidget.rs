@@ -149,9 +149,9 @@ impl RateLimitWarningState {
     fn take_warnings(
         &mut self,
         secondary_used_percent: Option<f64>,
-        secondary_window_minutes: Option<u64>,
+        secondary_window_minutes: Option<i64>,
         primary_used_percent: Option<f64>,
-        primary_window_minutes: Option<u64>,
+        primary_window_minutes: Option<i64>,
     ) -> Vec<String> {
         let reached_secondary_cap =
             matches!(secondary_used_percent, Some(percent) if percent == 100.0);
@@ -199,6 +199,28 @@ impl RateLimitWarningState {
         }
 
         warnings
+    }
+}
+
+pub(crate) fn get_limits_duration(windows_minutes: i64) -> String {
+    const MINUTES_PER_HOUR: i64 = 60;
+    const MINUTES_PER_DAY: i64 = 24 * MINUTES_PER_HOUR;
+    const MINUTES_PER_WEEK: i64 = 7 * MINUTES_PER_DAY;
+    const MINUTES_PER_MONTH: i64 = 30 * MINUTES_PER_DAY;
+    const ROUNDING_BIAS_MINUTES: i64 = 3;
+
+    let windows_minutes = windows_minutes.max(0);
+
+    if windows_minutes <= MINUTES_PER_DAY.saturating_add(ROUNDING_BIAS_MINUTES) {
+        let adjusted = windows_minutes.saturating_add(ROUNDING_BIAS_MINUTES);
+        let hours = std::cmp::max(1, adjusted / MINUTES_PER_HOUR);
+        format!("{hours}h")
+    } else if windows_minutes <= MINUTES_PER_WEEK.saturating_add(ROUNDING_BIAS_MINUTES) {
+        "weekly".to_string()
+    } else if windows_minutes <= MINUTES_PER_MONTH.saturating_add(ROUNDING_BIAS_MINUTES) {
+        "monthly".to_string()
+    } else {
+        "annual".to_string()
     }
 }
 
@@ -2319,8 +2341,8 @@ pub(crate) fn refresh_model_metadata(config: &mut Config) {
     config.model_family = family;
 
     if let Some(info) = get_model_info(&config.model_family) {
-        config.model_context_window = Some(info.context_window);
-        config.model_max_output_tokens = Some(info.max_output_tokens);
+        config.model_context_window = Some(info.context_window());
+        config.model_max_output_tokens = Some(info.max_output_tokens());
         config.model_auto_compact_token_limit = info.auto_compact_token_limit;
     } else {
         config.model_context_window = None;

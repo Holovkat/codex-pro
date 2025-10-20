@@ -56,28 +56,28 @@ impl RateLimitWindowKind {
     }
 }
 
-pub fn classify_window_minutes(minutes: u64) -> RateLimitWindowKind {
-    RateLimitWindowKind::from_minutes(minutes)
+pub fn classify_window_minutes(minutes: i64) -> RateLimitWindowKind {
+    RateLimitWindowKind::from_minutes(minutes.max(0) as u64)
 }
 
 pub fn resolve_window_kind(
-    window_minutes: Option<u64>,
+    window_minutes: Option<i64>,
     fallback: RateLimitWindowKind,
 ) -> RateLimitWindowKind {
     match window_minutes {
-        Some(minutes) if minutes > 0 => RateLimitWindowKind::from_minutes(minutes),
+        Some(minutes) if minutes > 0 => RateLimitWindowKind::from_minutes(minutes as u64),
         _ => fallback,
     }
 }
 
-pub fn window_label(window_minutes: Option<u64>, fallback: RateLimitWindowKind) -> String {
+pub fn window_label(window_minutes: Option<i64>, fallback: RateLimitWindowKind) -> String {
     resolve_window_kind(window_minutes, fallback).label()
 }
 
-pub fn window_title(window_minutes: Option<u64>, fallback: RateLimitWindowKind) -> String {
+pub fn window_title(window_minutes: Option<i64>, fallback: RateLimitWindowKind) -> String {
     resolve_window_kind(window_minutes, fallback).title()
 }
 
-pub fn window_short_label(window_minutes: Option<u64>, fallback: RateLimitWindowKind) -> String {
+pub fn window_short_label(window_minutes: Option<i64>, fallback: RateLimitWindowKind) -> String {
     resolve_window_kind(window_minutes, fallback).short_label()
 }

@@ -794,26 +794,26 @@ fn collect_text_field(value: &serde_json::Value) -> Option<String> {
 fn parse_token_usage(usage: &serde_json::Value) -> Option<TokenUsage> {
     let input_tokens = usage
         .get("prompt_tokens")
-        .and_then(serde_json::Value::as_u64)
+        .and_then(serde_json::Value::as_i64)
         .unwrap_or(0);
     let cached = usage
         .get("prompt_tokens_details")
         .and_then(|d| d.get("cached_tokens"))
-        .and_then(serde_json::Value::as_u64)
+        .and_then(serde_json::Value::as_i64)
         .unwrap_or(0);
     let output_tokens = usage
         .get("completion_tokens")
-        .and_then(serde_json::Value::as_u64)
+        .and_then(serde_json::Value::as_i64)
         .unwrap_or(0);
     let reasoning_tokens = usage
         .get("completion_tokens_details")
         .and_then(|d| d.get("reasoning_tokens"))
-        .and_then(serde_json::Value::as_u64)
+        .and_then(serde_json::Value::as_i64)
         .unwrap_or(0);
     let total_tokens = usage
         .get("total_tokens")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or_else(|| input_tokens + output_tokens);
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or_else(|| input_tokens.saturating_add(output_tokens));
 
     Some(TokenUsage {
         input_tokens,

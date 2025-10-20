@@ -349,7 +349,8 @@ fn format_rate_limit_window(
     format_rate_limit_row(label, window.used_percent, resets)
 }
 
-fn describe_window(minutes: u64) -> String {
+fn describe_window(minutes: i64) -> String {
+    let minutes = minutes.max(0) as u64;
     const MINUTES_PER_HOUR: u64 = 60;
     const MINUTES_PER_DAY: u64 = 24 * MINUTES_PER_HOUR;
     const MINUTES_PER_WEEK: u64 = 7 * MINUTES_PER_DAY;
@@ -455,7 +456,8 @@ fn title_case(input: &str) -> String {
     result
 }
 
-fn format_tokens_compact(value: u64) -> String {
+fn format_tokens_compact(value: i64) -> String {
+    let value = value.max(0) as u64;
     if value == 0 {
         return "0".to_string();
     }

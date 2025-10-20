@@ -1,4 +1,5 @@
 use super::helpers::format_reset_timestamp;
+use crate::chatwidget::get_limits_duration;
 use chrono::DateTime;
 use chrono::Local;
 use codex_common::rate_limits::RateLimitWindowKind;
@@ -27,7 +28,7 @@ pub(crate) enum StatusRateLimitData {
 pub(crate) struct RateLimitWindowDisplay {
     pub used_percent: f64,
     pub resets_at: Option<String>,
-    pub window_minutes: Option<u64>,
+    pub window_minutes: Option<i64>,
     fallback_kind: RateLimitWindowKind,
 }
 
@@ -132,7 +133,10 @@ pub(crate) fn compose_rate_limit_footer(
 }
 
 fn footer_summary(window: &RateLimitWindowDisplay) -> Option<String> {
-    let label = window.window_kind().short_label();
+    let label = window
+        .window_minutes
+        .map(get_limits_duration)
+        .unwrap_or_else(|| window.window_kind().short_label());
     let percent = format!("{:.0}%", window.used_percent);
     let mut summary = format!("{percent} {label}");
 

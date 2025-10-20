@@ -227,8 +227,8 @@ fn refresh_model_metadata(config: &mut Config) {
     config.model_family = family;
 
     if let Some(info) = get_model_info(&config.model_family) {
-        config.model_context_window = Some(info.context_window);
-        config.model_max_output_tokens = Some(info.max_output_tokens);
+        config.model_context_window = Some(info.context_window());
+        config.model_max_output_tokens = Some(info.max_output_tokens());
         config.model_auto_compact_token_limit = info.auto_compact_token_limit;
     } else {
         config.model_context_window = None;

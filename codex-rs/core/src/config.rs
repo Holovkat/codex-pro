@@ -100,10 +100,10 @@ pub struct Config {
     pub model_family: ModelFamily,
 
     /// Size of the context window for the model, in tokens.
-    pub model_context_window: Option<u64>,
+    pub model_context_window: Option<i64>,
 
     /// Maximum number of output tokens.
-    pub model_max_output_tokens: Option<u64>,
+    pub model_max_output_tokens: Option<i64>,
 
     /// Token usage threshold triggering auto-compaction of conversation history.
     pub model_auto_compact_token_limit: Option<i64>,
@@ -839,10 +839,10 @@ pub struct ConfigToml {
     pub model_provider: Option<String>,
 
     /// Size of the context window for the model, in tokens.
-    pub model_context_window: Option<u64>,
+    pub model_context_window: Option<i64>,
 
     /// Maximum number of output tokens.
-    pub model_max_output_tokens: Option<u64>,
+    pub model_max_output_tokens: Option<i64>,
 
     /// Token usage threshold triggering auto-compaction of conversation history.
     pub model_auto_compact_token_limit: Option<i64>,
@@ -2916,7 +2916,7 @@ model_verbosity = "high"
                 model_family: find_family_for_model("o3").expect("known model slug"),
                 model_context_window: Some(200_000),
                 model_max_output_tokens: Some(100_000),
-                model_auto_compact_token_limit: None,
+                model_auto_compact_token_limit: Some(180_000),
                 model_provider_id: "openai".to_string(),
                 model_provider: fixture.openai_provider.clone(),
                 approval_policy: AskForApproval::Never,
@@ -2985,7 +2985,7 @@ model_verbosity = "high"
             model_family: find_family_for_model("gpt-3.5-turbo").expect("known model slug"),
             model_context_window: Some(16_385),
             model_max_output_tokens: Some(4_096),
-            model_auto_compact_token_limit: None,
+            model_auto_compact_token_limit: Some(14_746),
             model_provider_id: "openai-chat-completions".to_string(),
             model_provider: fixture.openai_chat_completions_provider.clone(),
             approval_policy: AskForApproval::UnlessTrusted,
@@ -3069,7 +3069,7 @@ model_verbosity = "high"
             model_family: find_family_for_model("o3").expect("known model slug"),
             model_context_window: Some(200_000),
             model_max_output_tokens: Some(100_000),
-            model_auto_compact_token_limit: None,
+            model_auto_compact_token_limit: Some(180_000),
             model_provider_id: "openai".to_string(),
             model_provider: fixture.openai_provider.clone(),
             approval_policy: AskForApproval::OnFailure,
@@ -3139,7 +3139,7 @@ model_verbosity = "high"
             model_family: find_family_for_model("gpt-5").expect("known model slug"),
             model_context_window: Some(272_000),
             model_max_output_tokens: Some(128_000),
-            model_auto_compact_token_limit: None,
+            model_auto_compact_token_limit: Some(244_800),
             model_provider_id: "openai".to_string(),
             model_provider: fixture.openai_provider.clone(),
             approval_policy: AskForApproval::OnFailure,

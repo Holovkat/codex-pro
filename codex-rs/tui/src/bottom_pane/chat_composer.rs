@@ -111,7 +111,7 @@ pub(crate) struct ChatComposer {
     custom_prompts: Vec<CustomPrompt>,
     footer_mode: FooterMode,
     footer_hint_override: Option<Vec<(String, String)>>,
-    context_window_percent: Option<u8>,
+    context_window_percent: Option<i64>,
     index_status_line: Option<String>,
     rate_limit_summaries: Vec<String>,
 }
@@ -1489,7 +1489,7 @@ impl ChatComposer {
         self.is_task_running = running;
     }
 
-    pub(crate) fn set_context_window_percent(&mut self, percent: Option<u8>) {
+    pub(crate) fn set_context_window_percent(&mut self, percent: Option<i64>) {
         if self.context_window_percent != percent {
             self.context_window_percent = percent;
         }
