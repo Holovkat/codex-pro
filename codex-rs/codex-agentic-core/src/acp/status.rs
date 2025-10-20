@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use chrono::DateTime;
 use chrono::Local;
+use chrono::Utc;
 use codex_common::create_config_summary_entries;
 // rollback: avoid WireApi usage
 use codex_core::auth::get_auth_file;
@@ -341,7 +342,7 @@ fn format_rate_limit_window(
     window: &RateLimitWindow,
     captured_at: Option<&DateTime<Local>>,
 ) -> String {
-    let resets = captured_at.and_then(|ts| format_reset(window.resets_at.as_deref(), ts));
+    let resets = captured_at.and_then(|ts| format_reset(window.resets_at, ts));
     let label = match window.window_minutes {
         Some(minutes) => format!("{label} ({})", describe_window(minutes)),
         None => label.to_string(),
@@ -397,11 +398,9 @@ fn render_status_limit_progress_bar(percent_used: f64) -> String {
     )
 }
 
-fn format_reset(resets_at: Option<&str>, captured_at: &DateTime<Local>) -> Option<String> {
+fn format_reset(resets_at: Option<i64>, captured_at: &DateTime<Local>) -> Option<String> {
     let reset_at = resets_at?;
-    let timestamp = chrono::DateTime::parse_from_rfc3339(reset_at)
-        .ok()?
-        .with_timezone(&Local);
+    let timestamp = DateTime::<Utc>::from_timestamp(reset_at, 0)?.with_timezone(&Local);
     Some(format_reset_timestamp(timestamp, *captured_at))
 }
 

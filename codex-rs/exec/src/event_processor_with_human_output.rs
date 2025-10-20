@@ -1,5 +1,6 @@
 use chrono::DateTime;
 use chrono::Local;
+use chrono::Utc;
 use codex_common::elapsed::format_duration;
 use codex_common::elapsed::format_elapsed;
 use codex_common::rate_limits::RateLimitWindowKind;
@@ -629,8 +630,8 @@ fn format_rate_limit_line(
     let percent = format!("{:.0}%", window.used_percent);
     let mut summary = format!("{percent} of {} limit", kind.title());
 
-    if let Some(resets_at) = window.resets_at.as_deref()
-        && let Ok(timestamp) = DateTime::parse_from_rfc3339(resets_at)
+    if let Some(resets_at) = window.resets_at
+        && let Some(timestamp) = DateTime::<Utc>::from_timestamp(resets_at, 0)
     {
         let local_time = timestamp.with_timezone(&Local);
         summary.push_str(" (resets ");

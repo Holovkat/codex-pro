@@ -2,9 +2,9 @@ use chrono::DateTime;
 use chrono::Utc;
 use serde::Deserialize;
 use serde::Serialize;
-use std::collections::HashMap;
 #[cfg(test)]
 use serial_test::serial;
+use std::collections::HashMap;
 use std::env;
 use std::fs::File;
 use std::fs::OpenOptions;

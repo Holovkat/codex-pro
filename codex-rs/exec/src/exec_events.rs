@@ -62,7 +62,7 @@ pub struct RateLimitWindowUsage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_minutes: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub resets_at: Option<String>,
+    pub resets_at: Option<i64>,
 }
 
 /// Snapshot of primary/secondary rate limit usage.

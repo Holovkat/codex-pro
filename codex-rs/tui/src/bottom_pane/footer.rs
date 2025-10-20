@@ -15,8 +15,8 @@ use ratatui::widgets::Widget;
 pub(crate) struct FooterProps {
     pub(crate) mode: FooterMode,
     pub(crate) esc_backtrack_hint: bool,
-   pub(crate) use_shift_enter_hint: bool,
-   pub(crate) is_task_running: bool,
+    pub(crate) use_shift_enter_hint: bool,
+    pub(crate) is_task_running: bool,
     pub(crate) context_window_percent: Option<i64>,
     pub(crate) index_status: Option<String>,
     pub(crate) rate_limit_summaries: Vec<String>,
