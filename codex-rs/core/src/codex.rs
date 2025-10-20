@@ -1,5 +1,6 @@
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,6 +24,7 @@ use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::protocol::ConversationPathResponseEvent;
 use codex_protocol::protocol::ExitedReviewModeEvent;
+#[cfg(test)]
 use codex_protocol::protocol::McpAuthStatus;
 use codex_protocol::protocol::MemoryPreviewEntry;
 use codex_protocol::protocol::MemoryPreviewEvent;
@@ -1893,6 +1895,7 @@ pub(crate) async fn run_task(
                         .notify(&UserNotification::AgentTurnComplete {
                             thread_id: sess.conversation_id.to_string(),
                             turn_id: sub_id.clone(),
+                            cwd: turn_context.cwd.display().to_string(),
                             input_messages: turn_input_messages,
                             last_assistant_message: last_agent_message.clone(),
                         });

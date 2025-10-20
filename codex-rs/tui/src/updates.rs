@@ -76,23 +76,26 @@ fn version_filepath(config: &Config) -> PathBuf {
 
 fn resolve_latest_url(update_config: &UpdateConfig) -> Option<String> {
     if let Some(url) = &update_config.latest_url
-        && !url.trim().is_empty() {
-            return Some(url.clone());
-        }
+        && !url.trim().is_empty()
+    {
+        return Some(url.clone());
+    }
     if let Some(repo) = &update_config.repo
-        && !repo.trim().is_empty() {
-            return Some(format!(
-                "https://api.github.com/repos/{repo}/releases/latest"
-            ));
-        }
+        && !repo.trim().is_empty()
+    {
+        return Some(format!(
+            "https://api.github.com/repos/{repo}/releases/latest"
+        ));
+    }
     Some(LATEST_RELEASE_URL.to_string())
 }
 
 fn release_url(update_config: &UpdateConfig) -> Option<String> {
     if let Some(repo) = &update_config.repo
-        && !repo.trim().is_empty() {
-            return Some(format!("https://github.com/{repo}/releases/latest"));
-        }
+        && !repo.trim().is_empty()
+    {
+        return Some(format!("https://github.com/{repo}/releases/latest"));
+    }
     update_config
         .latest_url
         .as_ref()
