@@ -138,6 +138,7 @@ pub async fn run_main(
             .with_force_oss(cli.oss),
     );
     let oss_active = resolution.oss_active;
+    let include_plan_tool = resolution.include_plan_tool;
 
     if (cli.model.is_some() || cli.oss)
         && let Some(model) = resolution.model.clone()
@@ -174,7 +175,7 @@ pub async fn run_main(
         config_profile: cli.config_profile.clone(),
         codex_linux_sandbox_exe,
         base_instructions: Some(base_prompt.clone()),
-        include_plan_tool: Some(resolution.include_plan_tool),
+        include_plan_tool: Some(include_plan_tool),
         include_apply_patch_tool: None,
         include_view_image_tool: None,
         show_raw_agent_reasoning: oss_active.then_some(true),
