@@ -238,8 +238,11 @@ impl BottomPane {
             CancellationEvent::NotHandled
         } else {
             self.view_stack.pop();
-            self.set_composer_text(String::new());
+            let cleared = self.composer.clear_for_ctrl_c();
             self.show_ctrl_c_quit_hint();
+            if cleared.is_some() {
+                self.request_redraw();
+            }
             CancellationEvent::Handled
         }
     }
