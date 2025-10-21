@@ -613,6 +613,28 @@ impl App {
         self.chat_widget.set_index_status_line(line);
     }
 
+    fn apply_model_provider(&mut self, provider_id: &str) {
+        if self.config.model_provider_id == provider_id {
+            return;
+        }
+        if let Some(info) = self.config.model_providers.get(provider_id).cloned() {
+            self.config.model_provider_id = provider_id.to_string();
+            self.config.model_provider = info;
+            refresh_model_metadata(&mut self.config);
+            sanitize_reasoning_overrides(&mut self.config);
+            sanitize_tool_overrides(&mut self.config);
+            self.chat_widget.set_model_provider(
+                &self.config.model_provider_id,
+                &self.config.model_provider,
+            );
+        } else {
+            tracing::warn!(
+                provider_id,
+                "selected model provider not found in config when applying model preset"
+            );
+        }
+    }
+
     fn start_index_build(&mut self) {
         if self.index_progress.is_some() {
             self.chat_widget
@@ -962,20 +984,13 @@ impl App {
             AppEvent::UpdateReasoningEffort(effort) => {
                 self.on_update_reasoning_effort(effort);
             }
-            AppEvent::UpdateModelProvider(provider_id) => {
-                if let Some(info) = self.config.model_providers.get(&provider_id).cloned() {
-                    self.config.model_provider_id = provider_id;
-                    self.config.model_provider = info;
-                    refresh_model_metadata(&mut self.config);
-                    sanitize_reasoning_overrides(&mut self.config);
-                    sanitize_tool_overrides(&mut self.config);
-                    self.chat_widget.set_model_provider(
-                        &self.config.model_provider_id,
-                        &self.config.model_provider,
-                    );
+            AppEvent::OpenReasoningPopup { model } => {
+                if let Some(provider_id) = model.provider_id.as_deref() {
+                    self.apply_model_provider(provider_id);
                 } else {
-                    tracing::warn!(provider_id, "selected model provider not found in config");
+                    self.apply_model_provider(DEFAULT_OPENAI_PROVIDER_ID);
                 }
+                self.chat_widget.open_reasoning_popup(model);
             }
             AppEvent::UpdateModel(model) => {
                 self.chat_widget.set_model(&model);
@@ -983,14 +998,6 @@ impl App {
                 refresh_model_metadata(&mut self.config);
                 sanitize_reasoning_overrides(&mut self.config);
                 sanitize_tool_overrides(&mut self.config);
-            }
-            AppEvent::OpenReasoningPopup {
-                model,
-                provider_id,
-                presets,
-            } => {
-                self.chat_widget
-                    .open_reasoning_popup(model, provider_id, presets);
             }
             AppEvent::PersistModelSelection { model, effort } => {
                 let profile = self.active_profile.as_deref();

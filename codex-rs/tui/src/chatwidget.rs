@@ -107,6 +107,7 @@ use chrono::Local;
 use codex_common::approval_presets::ApprovalPreset;
 use codex_common::approval_presets::builtin_approval_presets;
 use codex_common::model_presets::ModelPreset;
+use codex_common::model_presets::ReasoningEffortPreset;
 use codex_common::model_presets::builtin_model_presets;
 use codex_common::rate_limits::RateLimitWindowKind;
 use codex_common::rate_limits::resolve_window_kind;
@@ -304,16 +305,6 @@ fn create_initial_user_message(text: String, image_paths: Vec<PathBuf>) -> Optio
 }
 
 impl ChatWidget {
-    fn model_description_for(slug: &str) -> Option<&'static str> {
-        if slug.starts_with("gpt-5-codex") {
-            Some("Optimized for coding tasks with many tools.")
-        } else if slug.starts_with("gpt-5") {
-            Some("Broad world knowledge with strong general reasoning.")
-        } else {
-            None
-        }
-    }
-
     fn flush_answer_stream_with_separator(&mut self) {
         if let Some(mut controller) = self.stream_controller.take()
             && let Some(cell) = controller.finalize()
@@ -1690,24 +1681,12 @@ impl ChatWidget {
     /// Open a popup to choose the model (stage 1). After selecting a model,
     /// a second popup is shown to choose the reasoning effort.
     pub(crate) fn open_model_popup(&mut self) {
-        use std::collections::BTreeMap;
-        use std::collections::HashMap;
-
         let current_model = self.config.model.clone();
         let current_provider = self.config.model_provider_id.clone();
         let auth_mode = self.auth_manager.auth().map(|auth| auth.mode);
 
-        let mut grouped: BTreeMap<(String, String), Vec<ModelPreset>> = BTreeMap::new();
-        let mut provider_labels: HashMap<String, String> = HashMap::new();
+        let mut presets = builtin_model_presets(auth_mode);
         let mut placeholder_items: Vec<SelectionItem> = Vec::new();
-
-        provider_labels.insert(DEFAULT_OPENAI_PROVIDER_ID.to_string(), "OpenAI".to_string());
-        for preset in builtin_model_presets(auth_mode) {
-            grouped
-                .entry((DEFAULT_OPENAI_PROVIDER_ID.to_string(), preset.model.clone()))
-                .or_default()
-                .push(preset);
-        }
 
         let settings_snapshot = settings::global();
         for (provider_id, provider) in settings_snapshot.custom_providers() {
@@ -1716,23 +1695,23 @@ impl ChatWidget {
             } else {
                 provider.name.clone()
             };
-            provider_labels.insert(provider_id.clone(), label.clone());
 
             match list_models_for_provider_blocking(&settings_snapshot, provider_id) {
                 Ok(mut models) if !models.is_empty() => {
                     models.sort();
                     models.dedup();
                     for model in models {
-                        grouped
-                            .entry((provider_id.clone(), model.clone()))
-                            .or_default()
-                            .push(ModelPreset {
-                                id: format!("{provider_id}:{model}"),
-                                label: model.clone(),
-                                description: format!("Custom provider `{label}`"),
-                                model,
-                                effort: None,
-                            });
+                        presets.push(ModelPreset {
+                            id: format!("{provider_id}:{model}"),
+                            model: model.clone(),
+                            display_name: model.clone(),
+                            description: format!("Custom provider `{label}`"),
+                            default_reasoning_effort: ReasoningEffort::Medium,
+                            supported_reasoning_efforts: Vec::new(),
+                            is_default: false,
+                            provider_id: Some(provider_id.clone()),
+                            provider_label: Some(label.clone()),
+                        });
                     }
                 }
                 Ok(_) => {
@@ -1763,35 +1742,41 @@ impl ChatWidget {
             }
         }
 
+        presets.sort_by(|a, b| {
+            (
+                a.provider_label()
+                    .to_ascii_lowercase(),
+                a.display_name.to_ascii_lowercase(),
+            )
+                .cmp(&(
+                    b.provider_label().to_ascii_lowercase(),
+                    b.display_name.to_ascii_lowercase(),
+                ))
+        });
+
         let mut items: Vec<SelectionItem> = Vec::new();
-        for ((provider_id, model_slug), presets_for_model) in grouped.into_iter() {
-            let provider_label = provider_labels
-                .get(&provider_id)
-                .cloned()
-                .unwrap_or_else(|| provider_id.clone());
-            let name = format!("{model_slug} [{provider_label}]");
-            let description = Self::model_description_for(&model_slug)
-                .map(std::string::ToString::to_string)
-                .or_else(|| {
-                    presets_for_model
-                        .iter()
-                        .find(|preset| !preset.description.is_empty())
-                        .map(|preset| preset.description.clone())
-                })
-                .or_else(|| {
-                    presets_for_model
-                        .first()
-                        .map(|preset| preset.description.clone())
-                });
-            let is_current = model_slug == current_model && provider_id == current_provider;
-            let model_slug_string = model_slug.clone();
-            let provider_for_model = provider_id.clone();
-            let presets_clone = presets_for_model.clone();
+        for preset in presets.into_iter() {
+            let provider_label = preset.provider_label().to_string();
+            let description = if preset.description.is_empty() {
+                None
+            } else {
+                Some(preset.description.clone())
+            };
+            let is_current = preset.model == current_model
+                && preset
+                    .provider_id
+                    .as_deref()
+                    .unwrap_or(DEFAULT_OPENAI_PROVIDER_ID)
+                    == current_provider;
+            let preset_for_action = preset.clone();
+            let name = format!("{} [{}]", preset.display_name, provider_label);
+            let search_value = format!(
+                "{} {} {}",
+                preset.display_name, provider_label, preset.model
+            );
             let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
                 tx.send(AppEvent::OpenReasoningPopup {
-                    model: model_slug_string.clone(),
-                    provider_id: provider_for_model.clone(),
-                    presets: presets_clone.clone(),
+                    model: preset_for_action.clone(),
                 });
             })];
             items.push(SelectionItem {
@@ -1800,7 +1785,7 @@ impl ChatWidget {
                 is_current,
                 actions,
                 dismiss_on_select: false,
-                search_value: Some(format!("{model_slug} {provider_label} {provider_id}")),
+                search_value: Some(search_value),
                 ..Default::default()
             });
         }
@@ -1841,31 +1826,34 @@ impl ChatWidget {
     }
 
     /// Open a popup to choose the reasoning effort (stage 2) for the given model.
-    pub(crate) fn open_reasoning_popup(
-        &mut self,
-        model_slug: String,
-        provider_id: String,
-        presets: Vec<ModelPreset>,
-    ) {
-        let default_effort = ReasoningEffortConfig::default();
+    pub(crate) fn open_reasoning_popup(&mut self, preset: ModelPreset) {
+        let default_effort: ReasoningEffortConfig = preset.default_reasoning_effort;
+        let mut supported = if preset.supported_reasoning_efforts.is_empty() {
+            vec![ReasoningEffortPreset {
+                effort: preset.default_reasoning_effort,
+                description: String::new(),
+            }]
+        } else {
+            preset.supported_reasoning_efforts.clone()
+        };
+        supported.sort_by(|a, b| a.effort.cmp(&b.effort));
 
-        let has_none_choice = presets.iter().any(|preset| preset.effort.is_none());
         struct EffortChoice {
             stored: Option<ReasoningEffortConfig>,
             display: ReasoningEffortConfig,
+            description: Option<String>,
         }
         let mut choices: Vec<EffortChoice> = Vec::new();
         for effort in ReasoningEffortConfig::iter() {
-            if presets.iter().any(|preset| preset.effort == Some(effort)) {
+            if supported.iter().any(|option| option.effort == effort) {
                 choices.push(EffortChoice {
                     stored: Some(effort),
                     display: effort,
-                });
-            }
-            if has_none_choice && default_effort == effort {
-                choices.push(EffortChoice {
-                    stored: None,
-                    display: effort,
+                    description: supported
+                        .iter()
+                        .find(|option| option.effort == effort)
+                        .map(|option| option.description.clone())
+                        .filter(|text| !text.is_empty()),
                 });
             }
         }
@@ -1873,24 +1861,24 @@ impl ChatWidget {
             choices.push(EffortChoice {
                 stored: Some(default_effort),
                 display: default_effort,
+                description: supported
+                    .iter()
+                    .find(|option| option.effort == default_effort)
+                    .map(|option| option.description.clone())
+                    .filter(|text| !text.is_empty()),
             });
         }
 
-        let default_choice: Option<ReasoningEffortConfig> = if has_none_choice {
-            None
-        } else if choices
+        let default_choice: Option<ReasoningEffortConfig> = choices
             .iter()
             .any(|choice| choice.stored == Some(default_effort))
-        {
-            Some(default_effort)
-        } else {
-            choices
-                .iter()
-                .find_map(|choice| choice.stored)
-                .or(Some(default_effort))
-        };
+            .then_some(Some(default_effort))
+            .flatten()
+            .or_else(|| choices.iter().find_map(|choice| choice.stored))
+            .or(Some(default_effort));
 
-        let is_current_model = self.config.model == model_slug;
+        let model_slug = preset.model.clone();
+        let is_current_model = self.config.model == preset.model;
         let highlight_choice = if is_current_model {
             self.config.model_reasoning_effort
         } else {
@@ -1908,22 +1896,20 @@ impl ChatWidget {
                 effort_label.push_str(" (default)");
             }
 
-            let description = presets
-                .iter()
-                .find(|preset| preset.effort == choice.stored && !preset.description.is_empty())
-                .map(|preset| preset.description.clone())
-                .or_else(|| {
-                    presets
-                        .iter()
-                        .find(|preset| preset.effort == choice.stored)
-                        .map(|preset| preset.description.clone())
-                });
+            let description = choice.description.clone();
+
+            let warning = "⚠ High reasoning effort can quickly consume Plus plan rate limits.";
+            let show_warning =
+                preset.model == "gpt-5-codex" && effort == ReasoningEffortConfig::High;
+            let selected_description = show_warning.then(|| {
+                description
+                    .as_ref()
+                    .map_or(warning.to_string(), |d| format!("{d}\n{warning}"))
+            });
 
             let model_for_action = model_slug.clone();
             let effort_for_action = choice.stored;
-            let provider_for_action = provider_id.clone();
             let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
-                tx.send(AppEvent::UpdateModelProvider(provider_for_action.clone()));
                 tx.send(AppEvent::CodexOp(Op::OverrideTurnContext {
                     cwd: None,
                     approval_policy: None,
@@ -1949,7 +1935,8 @@ impl ChatWidget {
 
             items.push(SelectionItem {
                 name: effort_label,
-                description,
+                description: description.clone(),
+                selected_description,
                 is_current: is_current_model && choice.stored == highlight_choice,
                 actions,
                 dismiss_on_select: true,

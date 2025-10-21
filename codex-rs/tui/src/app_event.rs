@@ -122,9 +122,6 @@ pub(crate) enum AppEvent {
     /// Update the current reasoning effort in the running app and widget.
     UpdateReasoningEffort(Option<ReasoningEffort>),
 
-    /// Update the active model provider in the running app and widget.
-    UpdateModelProvider(String),
-
     /// Update the current model slug in the running app and widget.
     UpdateModel(String),
 
@@ -135,11 +132,7 @@ pub(crate) enum AppEvent {
     },
 
     /// Open the reasoning selection popup after picking a model.
-    OpenReasoningPopup {
-        model: String,
-        provider_id: String,
-        presets: Vec<ModelPreset>,
-    },
+    OpenReasoningPopup { model: ModelPreset },
 
     /// Update the current approval policy in the running app and widget.
     UpdateAskForApprovalPolicy(AskForApproval),
