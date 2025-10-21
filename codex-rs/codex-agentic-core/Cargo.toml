@@ -1,0 +1,42 @@
+[package]
+name = "codex-agentic-core"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true, features = ["http1", "json", "macros", "tokio"] }
+blake3 = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+codex-core = { workspace = true }
+codex-ollama = { workspace = true }
+codex-protocol = { workspace = true }
+codex-common = { workspace = true }
+fastembed = { workspace = true }
+fslock = { workspace = true }
+futures = { workspace = true, default-features = false }
+hnsw_rs = { workspace = true }
+ignore = { workspace = true }
+dunce = { workspace = true }
+once_cell = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+shlex = { workspace = true }
+textwrap = { workspace = true }
+tokio = { workspace = true, features = ["io-std", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-stream = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+walkdir = { workspace = true }
+pathdiff = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

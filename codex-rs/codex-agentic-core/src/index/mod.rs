@@ -1,0 +1,26 @@
+pub mod analytics;
+pub mod builder;
+pub mod chunk;
+pub mod commands;
+pub mod embedder;
+pub mod events;
+pub mod files;
+pub mod paths;
+pub mod query;
+
+pub use builder::BuildOptions;
+pub use builder::build_with_progress;
+pub use commands::apply_command;
+pub use commands::build_command;
+pub use commands::clean_command;
+pub use commands::ignore_command;
+pub use commands::query_command;
+pub use commands::status_command;
+pub use commands::verify_command;
+pub use events::IndexEvent;
+pub use events::IndexSummary;
+pub use files::collect_indexable_files;
+pub use query::QueryHit;
+pub use query::QueryResponse;
+pub use query::filter_hits_by_confidence;
+pub use query::query_index;
