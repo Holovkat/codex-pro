@@ -138,6 +138,10 @@ impl CodexAuth {
         self.get_current_token_data().and_then(|t| t.account_id)
     }
 
+    pub fn get_account_email(&self) -> Option<String> {
+        self.get_current_token_data().and_then(|t| t.id_token.email)
+    }
+
     pub(crate) fn get_plan_type(&self) -> Option<PlanType> {
         self.get_current_token_data()
             .and_then(|t| t.id_token.chatgpt_plan_type)
@@ -390,7 +394,6 @@ pub struct AuthDotJson {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_refresh: Option<DateTime<Utc>>,
-
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_providers: Option<HashMap<String, CustomProviderAuth>>,
 }
@@ -482,6 +485,41 @@ mod tests {
         assert!(auth.tokens.is_none(), "tokens should be cleared");
     }
 
+    #[test]
+    fn custom_provider_api_key_roundtrip() {
+        let dir = tempdir().unwrap();
+        let manager = AuthManager::shared(dir.path().to_path_buf(), false);
+
+        assert_eq!(
+            manager
+                .custom_provider_api_key("anthropic")
+                .expect("should read auth.json"),
+            None
+        );
+
+        manager
+            .store_custom_provider_api_key("anthropic", "sk-custom")
+            .expect("store api key");
+        assert_eq!(
+            manager
+                .custom_provider_api_key("anthropic")
+                .expect("should read stored key"),
+            Some("sk-custom".to_string())
+        );
+
+        assert!(
+            manager
+                .delete_custom_provider_api_key("anthropic")
+                .expect("delete api key")
+        );
+        assert_eq!(
+            manager
+                .custom_provider_api_key("anthropic")
+                .expect("should read after delete"),
+            None
+        );
+    }
+
     #[tokio::test]
     async fn pro_account_with_no_api_key_uses_chatgpt_auth() {
         let codex_home = tempdir().unwrap();
@@ -562,41 +600,6 @@ mod tests {
         assert!(removed);
         assert!(!dir.path().join("auth.json").exists());
         Ok(())
-    }
-
-    #[test]
-    fn custom_provider_api_key_roundtrip() {
-        let dir = tempdir().unwrap();
-        let manager = AuthManager::shared(dir.path().to_path_buf(), false);
-
-        assert_eq!(
-            manager
-                .custom_provider_api_key("anthropic")
-                .expect("should read auth.json"),
-            None
-        );
-
-        manager
-            .store_custom_provider_api_key("anthropic", "sk-custom")
-            .expect("store api key");
-        assert_eq!(
-            manager
-                .custom_provider_api_key("anthropic")
-                .expect("should read stored key"),
-            Some("sk-custom".to_string())
-        );
-
-        assert!(
-            manager
-                .delete_custom_provider_api_key("anthropic")
-                .expect("delete api key")
-        );
-        assert_eq!(
-            manager
-                .custom_provider_api_key("anthropic")
-                .expect("should read after delete"),
-            None
-        );
     }
 
     struct AuthFileParams {

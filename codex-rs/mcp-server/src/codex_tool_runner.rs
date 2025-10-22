@@ -178,6 +178,7 @@ async fn run_codex_tool_session_inner(
                         cwd,
                         call_id,
                         reason: _,
+                        ..
                     }) => {
                         handle_exec_approval_request(
                             command,

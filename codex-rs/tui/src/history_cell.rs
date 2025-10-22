@@ -890,7 +890,9 @@ pub(crate) fn new_mcp_tools_output(
         lines.push(vec!["    • Auth: ".into(), status.to_string().into()].into());
 
         match &cfg.transport {
-            McpServerTransportConfig::Stdio { command, args, env } => {
+            McpServerTransportConfig::Stdio {
+                command, args, env, ..
+            } => {
                 let args_suffix = if args.is_empty() {
                     String::new()
                 } else {
@@ -1551,10 +1553,12 @@ mod tests {
                 ParsedCommand::Read {
                     name: "shimmer.rs".into(),
                     cmd: "cat shimmer.rs".into(),
+                    path: PathBuf::from("shimmer.rs"),
                 },
                 ParsedCommand::Read {
                     name: "status_indicator_widget.rs".into(),
                     cmd: "cat status_indicator_widget.rs".into(),
+                    path: PathBuf::from("status_indicator_widget.rs"),
                 },
             ],
             output: None,
@@ -1611,6 +1615,7 @@ mod tests {
                 vec![ParsedCommand::Read {
                     name: "shimmer.rs".into(),
                     cmd: "cat shimmer.rs".into(),
+                    path: PathBuf::from("shimmer.rs"),
                 }],
             )
             .unwrap();
@@ -1632,6 +1637,7 @@ mod tests {
                 vec![ParsedCommand::Read {
                     name: "status_indicator_widget.rs".into(),
                     cmd: "cat status_indicator_widget.rs".into(),
+                    path: PathBuf::from("status_indicator_widget.rs"),
                 }],
             )
             .unwrap();
@@ -1660,14 +1666,17 @@ mod tests {
                 ParsedCommand::Read {
                     name: "auth.rs".into(),
                     cmd: "cat auth.rs".into(),
+                    path: PathBuf::from("auth.rs"),
                 },
                 ParsedCommand::Read {
                     name: "auth.rs".into(),
                     cmd: "cat auth.rs".into(),
+                    path: PathBuf::from("auth.rs"),
                 },
                 ParsedCommand::Read {
                     name: "shimmer.rs".into(),
                     cmd: "cat shimmer.rs".into(),
+                    path: PathBuf::from("shimmer.rs"),
                 },
             ],
             output: None,

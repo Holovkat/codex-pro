@@ -22,6 +22,7 @@ mod chat_composer;
 mod chat_composer_history;
 mod command_popup;
 pub mod custom_prompt_view;
+mod feedback_view;
 mod file_search_popup;
 mod footer;
 mod list_selection_view;
@@ -32,6 +33,7 @@ pub mod popup_consts;
 mod scroll_state;
 mod selection_popup_common;
 mod textarea;
+pub(crate) use feedback_view::FeedbackView;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CancellationEvent {

@@ -35,6 +35,7 @@ use std::path::PathBuf;
 use tracing::error;
 use tracing_appender::non_blocking;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::Targets;
 use tracing_subscriber::prelude::*;
 
 mod app;
@@ -294,6 +295,13 @@ pub async fn run_main(
         .with_target(false)
         .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .with_filter(env_filter());
+    let feedback = codex_feedback::CodexFeedback::new();
+    let targets = Targets::new().with_default(tracing::Level::TRACE);
+    let feedback_layer = tracing_subscriber::fmt::layer()
+        .with_writer(feedback.make_writer())
+        .with_ansi(false)
+        .with_target(false)
+        .with_filter(targets);
 
     if oss_active {
         codex_ollama::ensure_oss_ready(&config)
@@ -312,22 +320,31 @@ pub async fn run_main(
         }
     };
 
-    if let Some(provider) = otel.as_ref() {
-        let otel_layer = OpenTelemetryTracingBridge::new(&provider.logger).with_filter(
-            tracing_subscriber::filter::filter_fn(codex_core::otel_init::codex_export_filter),
-        );
+    let subscriber = tracing_subscriber::registry()
+        .with(file_layer)
+        .with(feedback_layer);
 
-        let _ = tracing_subscriber::registry()
-            .with(file_layer)
-            .with(otel_layer)
-            .try_init();
-    } else {
-        let _ = tracing_subscriber::registry().with(file_layer).try_init();
+    match (otel.as_ref(), subscriber) {
+        (Some(provider), subscriber) => {
+            let otel_layer = OpenTelemetryTracingBridge::new(&provider.logger).with_filter(
+                tracing_subscriber::filter::filter_fn(codex_core::otel_init::codex_export_filter),
+            );
+            let _ = subscriber.with(otel_layer).try_init();
+        }
+        (None, subscriber) => {
+            let _ = subscriber.try_init();
+        }
     };
 
-    run_ratatui_app(cli, config, active_profile, should_show_trust_screen)
-        .await
-        .map_err(|err| std::io::Error::other(err.to_string()))
+    run_ratatui_app(
+        cli,
+        config,
+        active_profile,
+        should_show_trust_screen,
+        feedback,
+    )
+    .await
+    .map_err(|err| std::io::Error::other(err.to_string()))
 }
 
 async fn run_ratatui_app(
@@ -335,6 +352,7 @@ async fn run_ratatui_app(
     config: Config,
     active_profile: Option<String>,
     should_show_trust_screen: bool,
+    feedback: codex_feedback::CodexFeedback,
 ) -> color_eyre::Result<AppExitInfo> {
     let mut config = config;
     color_eyre::install()?;
@@ -462,6 +480,7 @@ async fn run_ratatui_app(
             return Ok(AppExitInfo {
                 token_usage: codex_core::protocol::TokenUsage::default(),
                 conversation_id: None,
+                update_action: None,
             });
         }
         if should_show_windows_wsl_screen {
@@ -506,6 +525,7 @@ async fn run_ratatui_app(
                 return Ok(AppExitInfo {
                     token_usage: codex_core::protocol::TokenUsage::default(),
                     conversation_id: None,
+                    update_action: None,
                 });
             }
             other => other,
@@ -524,6 +544,7 @@ async fn run_ratatui_app(
         prompt,
         images,
         resume_selection,
+        feedback,
     )
     .await;
 
@@ -543,6 +564,53 @@ fn restore() {
         eprintln!(
             "failed to restore terminal. Run `reset` or restart your terminal to recover: {err}"
         );
+    }
+}
+
+/// Get the update action from the environment.
+/// Returns `None` if not managed by npm, bun, or brew.
+#[cfg(not(debug_assertions))]
+pub(crate) fn get_update_action() -> Option<UpdateAction> {
+    let exe = std::env::current_exe().unwrap_or_default();
+    let managed_by_npm = std::env::var_os("CODEX_MANAGED_BY_NPM").is_some();
+    let managed_by_bun = std::env::var_os("CODEX_MANAGED_BY_BUN").is_some();
+    if managed_by_npm {
+        Some(UpdateAction::NpmGlobalLatest)
+    } else if managed_by_bun {
+        Some(UpdateAction::BunGlobalLatest)
+    } else if cfg!(target_os = "macos")
+        && (exe.starts_with("/opt/homebrew") || exe.starts_with("/usr/local"))
+    {
+        Some(UpdateAction::BrewUpgrade)
+    } else {
+        None
+    }
+}
+
+#[cfg(debug_assertions)]
+pub(crate) fn get_update_action() -> Option<UpdateAction> {
+    None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateAction {
+    NpmGlobalLatest,
+    BunGlobalLatest,
+    BrewUpgrade,
+}
+
+impl UpdateAction {
+    pub fn command_args(&self) -> (&'static str, &'static [&'static str]) {
+        match self {
+            UpdateAction::NpmGlobalLatest => ("npm", &["install", "-g", "@openai/codex@latest"]),
+            UpdateAction::BunGlobalLatest => ("bun", &["install", "-g", "@openai/codex@latest"]),
+            UpdateAction::BrewUpgrade => ("brew", &["upgrade", "codex"]),
+        }
+    }
+
+    pub fn command_str(&self) -> String {
+        let (cmd, args) = self.command_args();
+        format!("{} {}", cmd, args.join(" "))
     }
 }
 
@@ -594,8 +662,8 @@ fn determine_repo_trust_state(
         // if the user has specified either approval policy or sandbox mode in config.toml
         // skip the trust flow
         Ok(false)
-    } else if config_toml.is_cwd_trusted(&config.cwd) {
-        // if the current cwd project is trusted and no config has been set
+    } else if config.active_project.is_trusted() {
+        // if the current project is trusted and no config has been set
         // skip the trust flow and set the approval policy and sandbox mode
         config.approval_policy = AskForApproval::OnRequest;
         config.sandbox_policy = SandboxPolicy::new_workspace_write_policy();

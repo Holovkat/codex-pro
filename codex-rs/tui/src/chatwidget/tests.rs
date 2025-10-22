@@ -36,6 +36,7 @@ use codex_core::protocol::TaskCompleteEvent;
 use codex_core::protocol::TaskStartedEvent;
 use codex_core::protocol::ViewImageToolCallEvent;
 use codex_protocol::ConversationId;
+use codex_protocol::parse_command::ParsedCommand;
 use codex_protocol::plan_tool::PlanItemArg;
 use codex_protocol::plan_tool::StepStatus;
 use codex_protocol::plan_tool::UpdatePlanArgs;
@@ -82,6 +83,23 @@ fn upgrade_event_payload_for_tests(mut payload: serde_json::Value) -> serde_json
                 "formatted_output".to_string(),
                 serde_json::Value::String(formatted),
             );
+        } else if (ty == "exec_command_begin" || ty == "exec_approval_request")
+            && !m.contains_key("parsed_cmd")
+        {
+            let cmd_vec: Vec<String> = m
+                .get("command")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(ToString::to_string))
+                .collect();
+            let parsed_cmd: Vec<ParsedCommand> = codex_core::parse_command::parse_command(&cmd_vec)
+                .into_iter()
+                .map(Into::into)
+                .collect();
+            let value = serde_json::to_value(parsed_cmd)
+                .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
+            m.insert("parsed_cmd".to_string(), value);
         }
     }
     payload
@@ -232,6 +250,7 @@ async fn helpers_are_available_and_do_not_panic() {
         initial_prompt: None,
         initial_images: Vec::new(),
         enhanced_keys_supported: false,
+        feedback: codex_feedback::CodexFeedback::new(),
         auth_manager,
     };
     let mut w = ChatWidget::new(init, conversation_manager);
@@ -287,6 +306,7 @@ fn make_chatwidget_manual() -> (
         ghost_snapshots_disabled: false,
         needs_final_message_separator: false,
         last_rendered_width: std::cell::Cell::new(None),
+        feedback: codex_feedback::CodexFeedback::new(),
     };
     (widget, rx, op_rx)
 }
@@ -390,6 +410,7 @@ fn exec_approval_emits_proposed_command_and_decision_history() {
         reason: Some(
             "this is a test reason such as one that would be produced by the model".into(),
         ),
+        parsed_cmd: Vec::new(),
     };
     chat.handle_codex_event(Event {
         id: "sub-short".into(),
@@ -431,6 +452,7 @@ fn exec_approval_decision_truncates_multiline_and_long_commands() {
         reason: Some(
             "this is a test reason such as one that would be produced by the model".into(),
         ),
+        parsed_cmd: Vec::new(),
     };
     chat.handle_codex_event(Event {
         id: "sub-multi".into(),
@@ -478,6 +500,7 @@ fn exec_approval_decision_truncates_multiline_and_long_commands() {
         command: vec!["bash".into(), "-lc".into(), long],
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         reason: None,
+        parsed_cmd: Vec::new(),
     };
     chat.handle_codex_event(Event {
         id: "sub-long".into(),
@@ -505,7 +528,6 @@ fn begin_exec(chat: &mut ChatWidget, call_id: &str, raw_cmd: &str) {
     let command = vec!["bash".to_string(), "-lc".to_string(), raw_cmd.to_string()];
     let parsed_cmd: Vec<ParsedCommand> = codex_core::parse_command::parse_command(&command)
         .into_iter()
-        .map(Into::into)
         .collect();
     chat.handle_codex_event(Event {
         id: call_id.to_string(),
@@ -1199,10 +1221,7 @@ async fn binary_size_transcript_snapshot() {
                                     call_id: e.call_id.clone(),
                                     command: e.command,
                                     cwd: e.cwd,
-                                    parsed_cmd: parsed_cmd
-                                        .into_iter()
-                                        .map(std::convert::Into::into)
-                                        .collect(),
+                                    parsed_cmd: parsed_cmd.into_iter().collect(),
                                 }),
                             }
                         }
@@ -1317,6 +1336,7 @@ fn approval_modal_exec_snapshot() {
         reason: Some(
             "this is a test reason such as one that would be produced by the model".into(),
         ),
+        parsed_cmd: Vec::new(),
     };
     chat.handle_codex_event(Event {
         id: "sub-approve".into(),
@@ -1360,6 +1380,7 @@ fn approval_modal_exec_without_reason_snapshot() {
         command: vec!["bash".into(), "-lc".into(), "echo hello world".into()],
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         reason: None,
+        parsed_cmd: Vec::new(),
     };
     chat.handle_codex_event(Event {
         id: "sub-approve-noreason".into(),
@@ -1569,6 +1590,7 @@ fn status_widget_and_approval_modal_snapshot() {
         reason: Some(
             "this is a test reason such as one that would be produced by the model".into(),
         ),
+        parsed_cmd: Vec::new(),
     };
     chat.handle_codex_event(Event {
         id: "sub-approve-exec".into(),
@@ -2230,17 +2252,16 @@ fn chatwidget_exec_and_status_layout_vt100_snapshot() {
             command: vec!["bash".into(), "-lc".into(), "rg \"Change Approved\"".into()],
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             parsed_cmd: vec![
-                codex_core::parse_command::ParsedCommand::Search {
+                ParsedCommand::Search {
                     query: Some("Change Approved".into()),
                     path: None,
                     cmd: "rg \"Change Approved\"".into(),
-                }
-                .into(),
-                codex_core::parse_command::ParsedCommand::Read {
+                },
+                ParsedCommand::Read {
                     name: "diff_render.rs".into(),
                     cmd: "cat diff_render.rs".into(),
-                }
-                .into(),
+                    path: PathBuf::from("diff_render.rs"),
+                },
             ],
         }),
     });

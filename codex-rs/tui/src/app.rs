@@ -1,3 +1,4 @@
+use crate::UpdateAction;
 use crate::app_backtrack::BacktrackState;
 use crate::app_event::AppEvent;
 use crate::app_event::ByokDraftField;
@@ -13,6 +14,7 @@ use crate::chatwidget::refresh_model_metadata;
 use crate::diff_render::DiffSummary;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::file_search::FileSearchManager;
+use crate::get_update_action;
 use crate::history_cell::HistoryCell;
 use crate::index_delta::SnapshotDiff;
 use crate::index_delta::spawn_delta_monitor;
@@ -83,6 +85,7 @@ const SEARCH_CODE_TOP_K: usize = 12;
 pub struct AppExitInfo {
     pub token_usage: TokenUsage,
     pub conversation_id: Option<ConversationId>,
+    pub update_action: Option<UpdateAction>,
 }
 
 #[derive(Debug, Clone)]
@@ -280,6 +283,8 @@ pub(crate) struct App {
 
     // Esc-backtracking state grouped
     pub(crate) backtrack: crate::app_backtrack::BacktrackState,
+    pub(crate) feedback: codex_feedback::CodexFeedback,
+    pub(crate) pending_update_action: Option<UpdateAction>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -292,6 +297,7 @@ struct IndexProgressState {
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub async fn run(
         tui: &mut tui::Tui,
         auth_manager: Arc<AuthManager>,
@@ -300,6 +306,7 @@ impl App {
         initial_prompt: Option<String>,
         initial_images: Vec<PathBuf>,
         resume_selection: ResumeSelection,
+        feedback: codex_feedback::CodexFeedback,
     ) -> Result<AppExitInfo> {
         use tokio_stream::StreamExt;
         let (app_event_tx, mut app_event_rx) = unbounded_channel();
@@ -322,6 +329,7 @@ impl App {
                     initial_images: initial_images.clone(),
                     enhanced_keys_supported,
                     auth_manager: auth_manager.clone(),
+                    feedback: feedback.clone(),
                 };
                 ChatWidget::new(init, conversation_manager.clone())
             }
@@ -344,6 +352,7 @@ impl App {
                     initial_images: initial_images.clone(),
                     enhanced_keys_supported,
                     auth_manager: auth_manager.clone(),
+                    feedback: feedback.clone(),
                 };
                 ChatWidget::new_from_existing(
                     init,
@@ -385,6 +394,8 @@ impl App {
             has_emitted_history_lines: false,
             commit_anim_running: Arc::new(AtomicBool::new(false)),
             backtrack: BacktrackState::default(),
+            feedback,
+            pending_update_action: get_update_action(),
         };
 
         app.refresh_index_status_line();
@@ -414,6 +425,7 @@ impl App {
         Ok(AppExitInfo {
             token_usage: app.token_usage(),
             conversation_id: app.chat_widget.conversation_id(),
+            update_action: app.pending_update_action,
         })
     }
 
@@ -638,6 +650,7 @@ impl App {
                     initial_images: Vec::new(),
                     enhanced_keys_supported: self.enhanced_keys_supported,
                     auth_manager: self.auth_manager.clone(),
+                    feedback: self.feedback.clone(),
                 };
                 self.chat_widget = ChatWidget::new(init, self.server.clone());
                 tui.frame_requester().schedule_frame();
@@ -1989,6 +2002,8 @@ mod tests {
             enhanced_keys_supported: false,
             commit_anim_running: Arc::new(AtomicBool::new(false)),
             backtrack: BacktrackState::default(),
+            feedback: codex_feedback::CodexFeedback::new(),
+            pending_update_action: None,
         }
     }
 

@@ -1,11 +1,12 @@
 use std::time::Duration;
 
-use crate::CodexAuth;
 use crate::ModelProviderInfo;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
 use crate::error::CodexErr;
+use crate::error::ConnectionFailedError;
+use crate::error::ResponseStreamFailed;
 use crate::error::Result;
 use crate::error::RetryLimitReachedError;
 use crate::error::UnexpectedResponseError;
@@ -37,7 +38,6 @@ pub(crate) async fn stream_chat_completions(
     model_family: &ModelFamily,
     client: &reqwest::Client,
     provider: &ModelProviderInfo,
-    auth: &Option<CodexAuth>,
     otel_event_manager: &OtelEventManager,
 ) -> Result<ResponseStream> {
     if prompt.output_schema.is_some() {
@@ -288,7 +288,7 @@ pub(crate) async fn stream_chat_completions(
 
     debug!(
         "POST to {}: {}",
-        provider.get_full_url(auth),
+        provider.get_full_url(&None),
         serde_json::to_string_pretty(&payload).unwrap_or_default()
     );
 
@@ -297,7 +297,7 @@ pub(crate) async fn stream_chat_completions(
     loop {
         attempt += 1;
 
-        let req_builder = provider.create_request_builder(client, auth).await?;
+        let req_builder = provider.create_request_builder(client, &None).await?;
 
         let res = otel_event_manager
             .log_request(attempt, || {
@@ -311,7 +311,12 @@ pub(crate) async fn stream_chat_completions(
         match res {
             Ok(resp) if resp.status().is_success() => {
                 let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent>>(1600);
-                let stream = resp.bytes_stream().map_err(CodexErr::Reqwest);
+                let stream = resp.bytes_stream().map_err(|e| {
+                    CodexErr::ResponseStreamFailed(ResponseStreamFailed {
+                        source: e,
+                        request_id: None,
+                    })
+                });
                 tokio::spawn(process_chat_sse(
                     stream,
                     tx_event,
@@ -351,7 +356,9 @@ pub(crate) async fn stream_chat_completions(
             }
             Err(e) => {
                 if attempt > max_retries {
-                    return Err(e.into());
+                    return Err(CodexErr::ConnectionFailed(ConnectionFailedError {
+                        source: e,
+                    }));
                 }
                 let delay = backoff(attempt);
                 tokio::time::sleep(delay).await;

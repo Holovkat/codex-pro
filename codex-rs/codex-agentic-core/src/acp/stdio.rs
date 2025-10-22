@@ -1569,7 +1569,9 @@ fn format_mcp_tools_output(config: &Config, event: &McpListToolsResponseEvent) -
         lines.push(format!("    • Auth: {auth}"));
 
         match &cfg.transport {
-            McpServerTransportConfig::Stdio { command, args, env } => {
+            McpServerTransportConfig::Stdio {
+                command, args, env, ..
+            } => {
                 let mut cmd = command.clone();
                 if !args.is_empty() {
                     cmd.push(' ');
@@ -1592,6 +1594,7 @@ fn format_mcp_tools_output(config: &Config, event: &McpListToolsResponseEvent) -
             McpServerTransportConfig::StreamableHttp {
                 url,
                 bearer_token_env_var,
+                ..
             } => {
                 lines.push("    • Transport: streamable-http".to_string());
                 lines.push(format!("    • URL: {url}"));

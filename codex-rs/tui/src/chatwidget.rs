@@ -47,6 +47,7 @@ use codex_core::protocol::UserMessageEvent;
 use codex_core::protocol::ViewImageToolCallEvent;
 use codex_core::protocol::WebSearchBeginEvent;
 use codex_core::protocol::WebSearchEndEvent;
+use codex_feedback::CodexFeedback;
 use codex_protocol::ConversationId;
 use codex_protocol::parse_command::ParsedCommand;
 use crossterm::event::KeyCode;
@@ -209,6 +210,7 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) initial_prompt: Option<String>,
     pub(crate) initial_images: Vec<PathBuf>,
     pub(crate) enhanced_keys_supported: bool,
+    pub(crate) feedback: CodexFeedback,
     pub(crate) auth_manager: Arc<AuthManager>,
 }
 
@@ -254,6 +256,7 @@ pub(crate) struct ChatWidget {
     needs_final_message_separator: bool,
 
     last_rendered_width: std::cell::Cell<Option<usize>>,
+    feedback: CodexFeedback,
 }
 
 struct UserMessage {
@@ -907,6 +910,7 @@ impl ChatWidget {
             initial_prompt,
             initial_images,
             enhanced_keys_supported,
+            feedback,
             auth_manager,
         } = common;
         let mut rng = rand::rng();
@@ -952,6 +956,7 @@ impl ChatWidget {
             ghost_snapshots_disabled: true,
             needs_final_message_separator: false,
             last_rendered_width: std::cell::Cell::new(None),
+            feedback,
         }
     }
 
@@ -968,6 +973,7 @@ impl ChatWidget {
             initial_prompt,
             initial_images,
             enhanced_keys_supported,
+            feedback,
             auth_manager,
         } = common;
         let mut rng = rand::rng();
@@ -1015,6 +1021,7 @@ impl ChatWidget {
             ghost_snapshots_disabled: true,
             needs_final_message_separator: false,
             last_rendered_width: std::cell::Cell::new(None),
+            feedback,
         }
     }
 
@@ -1143,6 +1150,25 @@ impl ChatWidget {
             }
             SlashCommand::Approvals => {
                 self.open_approvals_popup();
+            }
+            SlashCommand::Feedback => {
+                let snapshot = self.feedback.snapshot(self.conversation_id);
+                match snapshot.save_to_temp_file() {
+                    Ok(path) => {
+                        crate::bottom_pane::FeedbackView::show(
+                            &mut self.bottom_pane,
+                            path,
+                            snapshot,
+                        );
+                        self.request_redraw();
+                    }
+                    Err(e) => {
+                        self.add_to_history(history_cell::new_error_event(format!(
+                            "Failed to save feedback logs: {e}"
+                        )));
+                        self.request_redraw();
+                    }
+                }
             }
             SlashCommand::Quit => {
                 self.app_event_tx.send(AppEvent::ExitRequest);

@@ -1,12 +1,12 @@
 use assert_cmd::Command as AssertCommand;
 use codex_core::RolloutRecorder;
 use codex_core::protocol::GitInfo;
+use core_test_support::fs_wait;
 use core_test_support::skip_if_no_network;
+use std::fs;
 use std::time::Duration;
-use std::time::Instant;
 use tempfile::TempDir;
 use uuid::Uuid;
-use walkdir::WalkDir;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
@@ -28,7 +28,7 @@ fn write_settings(
     let contents = format!(
         "{{\n{instructions_line}  \"model\": {{\n    \"provider\": \"{provider_id}\",\n    \"default\": \"{default_model}\"\n  }},\n  \"providers\": {{\n    \"custom\": {{\n      \"{provider_id}\": {{\n        \"name\": \"{provider_id}\",\n        \"base_url\": \"{base_url}\",\n        \"wire_api\": \"{wire_api}\",\n        \"default_model\": \"{default_model}\",\n        \"cached_models\": [\"{default_model}\"]\n      }}\n    }}\n  }}\n}}"
     );
-    if let Err(err) = std::fs::write(&settings_path, contents) {
+    if let Err(err) = fs::write(&settings_path, contents) {
         panic!(
             "failed to write settings to {}: {err}",
             settings_path.display()
@@ -153,9 +153,6 @@ async fn exec_cli_applies_experimental_instructions_file() {
 
     let marker = "cli-experimental-instructions-marker";
 
-    // Build a provider override that points at the mock server and instructs
-    // Codex to use the Responses API with the dummy env var.
-
     let home = TempDir::new().unwrap();
     write_settings(
         &home,
@@ -203,8 +200,6 @@ async fn exec_cli_applies_experimental_instructions_file() {
     println!("Stderr:\n{}", String::from_utf8_lossy(&output.stderr));
     assert!(output.status.success());
 
-    // Inspect the captured request and verify our custom base instructions were
-    // included in the `instructions` field.
     resp_mock.single_request();
 }
 
@@ -269,23 +264,14 @@ async fn responses_api_stream_cli() {
 
 /// End-to-end: create a session (writes rollout), verify the file, then resume and confirm append.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn integration_creates_and_checks_session_file() {
+async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
     // Honor sandbox network restrictions for CI parity with the other tests.
-    skip_if_no_network!();
+    skip_if_no_network!(Ok(()));
 
     // 1. Temp home so we read/write isolated session files.
-    let home = TempDir::new().unwrap();
+    let home = TempDir::new()?;
     write_settings(
         &home,
-        "mock",
-        "http://unused.local",
-        "responses",
-        "glm-4.6",
-        None,
-    );
-    let workspace = TempDir::new().unwrap();
-    write_settings(
-        &workspace,
         "mock",
         "http://unused.local",
         "responses",
@@ -303,6 +289,15 @@ async fn integration_creates_and_checks_session_file() {
 
     // 4. Run the codex CLI through cargo (ensures the right bin is built) and invoke `exec`,
     //    which is what records a session.
+    let workspace = TempDir::new()?;
+    write_settings(
+        &workspace,
+        "mock",
+        "http://unused.local",
+        "responses",
+        "glm-4.6",
+        None,
+    );
     let mut cmd = AssertCommand::new("cargo");
     cmd.arg("run")
         .arg("-p")
@@ -335,63 +330,20 @@ async fn integration_creates_and_checks_session_file() {
 
     // Wait for sessions dir to appear.
     let sessions_dir = home.path().join("sessions");
-    let dir_deadline = Instant::now() + Duration::from_secs(5);
-    while !sessions_dir.exists() && Instant::now() < dir_deadline {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert!(sessions_dir.exists(), "sessions directory never appeared");
+    fs_wait::wait_for_path_exists(&sessions_dir, Duration::from_secs(5)).await?;
 
     // Find the session file that contains `marker`.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut matching_path: Option<std::path::PathBuf> = None;
-    while Instant::now() < deadline && matching_path.is_none() {
-        for entry in WalkDir::new(&sessions_dir) {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            if !entry.file_name().to_string_lossy().ends_with(".jsonl") {
-                continue;
-            }
-            let path = entry.path();
-            let Ok(content) = std::fs::read_to_string(path) else {
-                continue;
-            };
-            let mut lines = content.lines();
-            if lines.next().is_none() {
-                continue;
-            }
-            for line in lines {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let item: serde_json::Value = match serde_json::from_str(line) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                if item.get("type").and_then(|t| t.as_str()) == Some("response_item")
-                    && let Some(payload) = item.get("payload")
-                    && payload.get("type").and_then(|t| t.as_str()) == Some("message")
-                    && let Some(c) = payload.get("content")
-                    && c.to_string().contains(&marker)
-                {
-                    matching_path = Some(path.to_path_buf());
-                    break;
-                }
-            }
+    let marker_clone = marker.clone();
+    let path = fs_wait::wait_for_matching_file(&sessions_dir, Duration::from_secs(10), move |p| {
+        if p.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            return false;
         }
-        if matching_path.is_none() {
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
-
-    let path = match matching_path {
-        Some(p) => p,
-        None => panic!("No session file containing the marker was found"),
-    };
+        let Ok(content) = std::fs::read_to_string(p) else {
+            return false;
+        };
+        content.contains(&marker_clone)
+    })
+    .await?;
 
     // Basic sanity checks on location and metadata.
     let rel = match path.strip_prefix(&sessions_dir) {
@@ -481,22 +433,16 @@ async fn integration_creates_and_checks_session_file() {
     cmd2.arg("run")
         .arg("-p")
         .arg("codex-cli")
-        .arg("--bin")
-        .arg("codex-agentic")
         .arg("--quiet")
         .arg("--")
         .arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-C")
-        .arg(workspace.path())
+        .arg(env!("CARGO_MANIFEST_DIR"))
         .arg(&prompt2)
         .arg("resume")
         .arg("--last");
     cmd2.env("CODEX_HOME", home.path())
-        .env(
-            "CODEX_SETTINGS_PATH",
-            workspace.path().join("settings.json"),
-        )
         .env("OPENAI_API_KEY", "dummy")
         .env("CODEX_RS_SSE_FIXTURE", &fixture)
         .env("OPENAI_BASE_URL", "http://unused.local");
@@ -505,42 +451,25 @@ async fn integration_creates_and_checks_session_file() {
     assert!(output2.status.success(), "resume codex-cli run failed");
 
     // Find the new session file containing the resumed marker.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut resumed_path: Option<std::path::PathBuf> = None;
-    while Instant::now() < deadline && resumed_path.is_none() {
-        for entry in WalkDir::new(&sessions_dir) {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            if !entry.file_type().is_file() {
-                continue;
+    let marker2_clone = marker2.clone();
+    let resumed_path =
+        fs_wait::wait_for_matching_file(&sessions_dir, Duration::from_secs(10), move |p| {
+            if p.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                return false;
             }
-            if !entry.file_name().to_string_lossy().ends_with(".jsonl") {
-                continue;
-            }
-            let p = entry.path();
-            let Ok(c) = std::fs::read_to_string(p) else {
-                continue;
-            };
-            if c.contains(&marker2) {
-                resumed_path = Some(p.to_path_buf());
-                break;
-            }
-        }
-        if resumed_path.is_none() {
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
+            std::fs::read_to_string(p)
+                .map(|content| content.contains(&marker2_clone))
+                .unwrap_or(false)
+        })
+        .await?;
 
-    let resumed_path = resumed_path.expect("No resumed session file found containing the marker2");
     // Resume should write to the existing log file.
     assert_eq!(
         resumed_path, path,
         "resume should create a new session file"
     );
 
-    let resumed_content = std::fs::read_to_string(&resumed_path).unwrap();
+    let resumed_content = std::fs::read_to_string(&resumed_path)?;
     assert!(
         resumed_content.contains(&marker),
         "resumed file missing original marker"
@@ -549,6 +478,7 @@ async fn integration_creates_and_checks_session_file() {
         resumed_content.contains(&marker2),
         "resumed file missing resumed marker"
     );
+    Ok(())
 }
 
 /// Integration test to verify git info is collected and recorded in session files.

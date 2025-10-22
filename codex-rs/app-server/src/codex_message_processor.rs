@@ -1284,6 +1284,7 @@ async fn apply_bespoke_event_handling(
             command,
             cwd,
             reason,
+            ..
         }) => {
             let params = ExecCommandApprovalParams {
                 conversation_id,
