@@ -21,7 +21,6 @@ members = [
     "git-tooling",
     "linux-sandbox",
     "login",
-    "mcp-client",
     "mcp-server",
     "mcp-types",
     "ollama",
@@ -70,7 +69,6 @@ codex-file-search = { path = "file-search" }
 codex-git-tooling = { path = "git-tooling" }
 codex-linux-sandbox = { path = "linux-sandbox" }
 codex-login = { path = "login" }
-codex-mcp-client = { path = "mcp-client" }
 codex-mcp-server = { path = "mcp-server" }
 codex-ollama = { path = "ollama" }
 codex-otel = { path = "otel" }
