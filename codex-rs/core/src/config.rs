@@ -27,8 +27,10 @@ use crate::git_info::resolve_root_git_project_for_trust;
 use crate::model_family::ModelFamily;
 use crate::model_family::derive_default_model_family;
 use crate::model_family::find_family_for_model;
+use crate::model_provider_info::BUILT_IN_OSS_MODEL_PROVIDER_ID;
 use crate::model_provider_info::ModelProviderInfo;
 use crate::model_provider_info::built_in_model_providers;
+use crate::model_provider_info::oss_model_supports_tools;
 use crate::openai_model_info::get_model_info;
 use crate::project_doc::DEFAULT_PROJECT_DOC_FILENAME;
 use crate::project_doc::LOCAL_PROJECT_DOC_FILENAME;
@@ -71,6 +73,17 @@ pub const GPT_5_CODEX_MEDIUM_MODEL: &str = "gpt-5-codex";
 pub(crate) const PROJECT_DOC_MAX_BYTES: usize = 32 * 1024; // 32 KiB
 
 pub(crate) const CONFIG_TOML_FILE: &str = "config.toml";
+
+fn provider_id_is_zai(id: &str) -> bool {
+    id.eq_ignore_ascii_case("zai")
+}
+
+fn base_url_is_zai(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.contains("open.bigmodel.cn/api/coding/paas/")
+        || lower.contains("api.z.ai/api/coding/paas/")
+        || lower.contains("api.z.ai/api/paas/")
+}
 
 /// Application configuration loaded from disk and merged with overrides.
 #[derive(Debug, Clone, PartialEq)]
@@ -1201,7 +1214,6 @@ impl Config {
         }
 
         let requested_model_provider_id = model_provider
-            .clone()
             .or_else(|| config_profile.model_provider.clone())
             .or_else(|| cfg.model_provider.clone());
 
@@ -1421,6 +1433,28 @@ impl Config {
             }
         }
         Ok(config)
+    }
+
+    pub fn provider_allows_tool_calls(&self) -> bool {
+        if provider_id_is_zai(&self.model_provider_id) {
+            return false;
+        }
+
+        if self
+            .model_provider
+            .base_url
+            .as_deref()
+            .map(base_url_is_zai)
+            .unwrap_or(false)
+        {
+            return false;
+        }
+
+        if self.model_provider_id == BUILT_IN_OSS_MODEL_PROVIDER_ID {
+            return oss_model_supports_tools(self.model.as_str());
+        }
+
+        true
     }
 
     fn load_instructions(codex_dir: Option<&Path>) -> Option<String> {

@@ -31,11 +31,13 @@ pub(crate) struct ToolsConfig {
     pub include_view_image_tool: bool,
     pub experimental_unified_exec_tool: bool,
     pub experimental_supported_tools: Vec<String>,
+    pub allow_tools: bool,
 }
 
 pub(crate) struct ToolsConfigParams<'a> {
     pub(crate) model_family: &'a ModelFamily,
     pub(crate) features: &'a Features,
+    pub(crate) allow_tools: bool,
 }
 
 impl ToolsConfig {
@@ -43,13 +45,16 @@ impl ToolsConfig {
         let ToolsConfigParams {
             model_family,
             features,
+            allow_tools,
         } = params;
-        let use_streamable_shell_tool = features.enabled(Feature::StreamableShell);
-        let experimental_unified_exec_tool = features.enabled(Feature::UnifiedExec);
-        let include_plan_tool = features.enabled(Feature::PlanTool);
-        let include_apply_patch_tool = features.enabled(Feature::ApplyPatchFreeform);
-        let include_web_search_request = features.enabled(Feature::WebSearchRequest);
-        let include_view_image_tool = features.enabled(Feature::ViewImageTool);
+        let use_streamable_shell_tool = features.enabled(Feature::StreamableShell) && *allow_tools;
+        let experimental_unified_exec_tool = features.enabled(Feature::UnifiedExec) && *allow_tools;
+        let include_plan_tool = features.enabled(Feature::PlanTool) && *allow_tools;
+        let include_apply_patch_tool =
+            features.enabled(Feature::ApplyPatchFreeform) && *allow_tools;
+        let include_web_search_request =
+            features.enabled(Feature::WebSearchRequest) && *allow_tools;
+        let include_view_image_tool = features.enabled(Feature::ViewImageTool) && *allow_tools;
 
         let shell_type = if use_streamable_shell_tool {
             ConfigShellToolType::Streamable
@@ -79,6 +84,7 @@ impl ToolsConfig {
             include_view_image_tool,
             experimental_unified_exec_tool,
             experimental_supported_tools: model_family.experimental_supported_tools.clone(),
+            allow_tools: *allow_tools,
         }
     }
 }
@@ -815,6 +821,10 @@ pub(crate) fn build_specs(
     config: &ToolsConfig,
     mcp_tools: Option<HashMap<String, mcp_types::Tool>>,
 ) -> ToolRegistryBuilder {
+    if !config.allow_tools {
+        return ToolRegistryBuilder::new();
+    }
+
     use crate::exec_command::EXEC_COMMAND_TOOL_NAME;
     use crate::exec_command::WRITE_STDIN_TOOL_NAME;
     use crate::exec_command::create_exec_command_tool_for_responses_api;
@@ -1022,6 +1032,7 @@ mod tests {
         let config = ToolsConfig::new(&ToolsConfigParams {
             model_family: &model_family,
             features: &features,
+            allow_tools: true,
         });
         let (tools, _) = build_specs(&config, Some(HashMap::new())).build();
 
@@ -1049,6 +1060,7 @@ mod tests {
         let config = ToolsConfig::new(&ToolsConfigParams {
             model_family: &model_family,
             features: &features,
+            allow_tools: true,
         });
         let (tools, _) = build_specs(&config, Some(HashMap::new())).build();
 
@@ -1077,6 +1089,7 @@ mod tests {
         let config = ToolsConfig::new(&ToolsConfigParams {
             model_family: &model_family,
             features: &features,
+            allow_tools: true,
         });
         let (tools, _) = build_specs(&config, None).build();
 
@@ -1095,6 +1108,7 @@ mod tests {
         let config = ToolsConfig::new(&ToolsConfigParams {
             model_family: &model_family,
             features: &features,
+            allow_tools: true,
         });
         let (tools, _) = build_specs(&config, None).build();
 
@@ -1125,6 +1139,7 @@ mod tests {
         let config = ToolsConfig::new(&ToolsConfigParams {
             model_family: &model_family,
             features: &features,
+            allow_tools: true,
         });
         let (tools, _) = build_specs(
             &config,
@@ -1231,6 +1246,7 @@ mod tests {
         let config = ToolsConfig::new(&ToolsConfigParams {
             model_family: &model_family,
             features: &features,
+            allow_tools: true,
         });
 
         // Intentionally construct a map with keys that would sort alphabetically.
@@ -1309,6 +1325,7 @@ mod tests {
         let config = ToolsConfig::new(&ToolsConfigParams {
             model_family: &model_family,
             features: &features,
+            allow_tools: true,
         });
 
         let (tools, _) = build_specs(
@@ -1379,6 +1396,7 @@ mod tests {
         let config = ToolsConfig::new(&ToolsConfigParams {
             model_family: &model_family,
             features: &features,
+            allow_tools: true,
         });
 
         let (tools, _) = build_specs(

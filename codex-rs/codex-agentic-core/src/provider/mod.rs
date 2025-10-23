@@ -3,9 +3,14 @@ use anyhow::Result;
 use codex_core::ModelProviderInfo;
 use codex_core::config::Config;
 use codex_core::default_client::create_client;
+use codex_core::features::Feature;
+use codex_core::features::Features;
+use codex_core::model_family::find_family_for_model;
+use codex_core::oss_model_supports_tools;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use tokio::runtime::Builder;
 use tokio::runtime::Handle;
 use tokio::task::block_in_place;
@@ -19,6 +24,27 @@ use codex_protocol::config_types::ReasoningSummary;
 pub const DEFAULT_OLLAMA_ENDPOINT: &str = "http://localhost:11434";
 pub const OSS_PROVIDER_ID: &str = "oss";
 pub const DEFAULT_OPENAI_PROVIDER_ID: &str = "openai";
+
+fn normalized_provider_id(id: &str) -> String {
+    let mut normalized = String::with_capacity(id.len());
+    for ch in id.chars() {
+        if ch.is_ascii_alphanumeric() {
+            normalized.push(ch.to_ascii_lowercase());
+        }
+    }
+    normalized
+}
+
+fn is_zai_provider_id(id: &str) -> bool {
+    normalized_provider_id(id) == "zai"
+}
+
+fn is_zai_base_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.contains("open.bigmodel.cn/api/coding/paas/")
+        || lower.contains("api.z.ai/api/coding/paas/")
+        || lower.contains("api.z.ai/api/paas/")
+}
 
 fn oss_endpoint(settings: &Settings) -> String {
     settings
@@ -228,10 +254,10 @@ pub fn resolve_model_provider(args: ResolveModelProviderArgs<'_>) -> ModelProvid
         } else if matches!(provider_override.as_deref(), Some(id) if id == OSS_PROVIDER_ID) {
             if force_oss {
                 model = Some(codex_ollama::DEFAULT_OSS_MODEL.to_string());
-            } else {
-                // A colon-free slug implies an OpenAI (Responses) model. Even if
-                // the saved provider prefers OSS, we switch back to the default
-                // OpenAI provider to avoid mismatched pairings.
+            } else if !find_family_for_model(model_name)
+                .map(|family| family.family.starts_with("gpt-oss"))
+                .unwrap_or(false)
+            {
                 provider_override = Some(DEFAULT_OPENAI_PROVIDER_ID.to_string());
             }
         }
@@ -269,19 +295,6 @@ pub fn plan_tool_supported(provider_id: &str, model: Option<&str>) -> bool {
     }
 }
 
-fn oss_model_supports_tools(model: &str) -> bool {
-    let slug_without_namespace = model
-        .rsplit_once('/')
-        .map(|(_, slug)| slug)
-        .unwrap_or(model);
-    let slug_without_variant = slug_without_namespace
-        .split_once(':')
-        .map(|(slug, _)| slug)
-        .unwrap_or(slug_without_namespace);
-
-    slug_without_variant.starts_with("gpt-oss") && !slug_without_namespace.contains("qwen2.5vl")
-}
-
 pub fn custom_providers(settings: &Settings) -> BTreeMap<String, CustomProvider> {
     settings
         .providers
@@ -310,6 +323,16 @@ pub fn custom_provider_model_info(provider_id: &str, custom: &CustomProvider) ->
         && needs_coding_plan_chat_mode(provider_id, &info)
     {
         info.wire_api = WireApi::Chat;
+    }
+
+    if let Some(headers) = custom.extra_headers.as_ref() {
+        let map: HashMap<String, String> = headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if !map.is_empty() {
+            info.http_headers = Some(map);
+        }
     }
 
     info
@@ -349,11 +372,11 @@ fn custom_provider_for_model(settings: &Settings, model: &str) -> Option<(String
 }
 
 fn needs_coding_plan_chat_mode(provider_id: &str, info: &ModelProviderInfo) -> bool {
-    provider_id.eq_ignore_ascii_case("zai")
+    is_zai_provider_id(provider_id)
         || info
             .base_url
             .as_deref()
-            .map(|url| url.contains("open.bigmodel.cn/api/coding/paas/"))
+            .map(|url| is_zai_base_url(url))
             .unwrap_or(false)
 }
 
@@ -365,28 +388,58 @@ pub fn sanitize_reasoning_overrides(config: &mut Config) {
     }
 }
 
-fn provider_supports_tool_calls(provider_id: &str, provider: &ModelProviderInfo) -> bool {
-    if provider_id.eq_ignore_ascii_case("zai") {
-        return false;
-    }
-
-    provider
-        .base_url
-        .as_deref()
-        .map(|url| !url.contains("open.bigmodel.cn/api/coding/paas/"))
-        .unwrap_or(true)
-}
-
 /// Disable tool surfaces that the active provider cannot support.
 pub fn sanitize_tool_overrides(config: &mut Config) {
-    if provider_supports_tool_calls(&config.model_provider_id, &config.model_provider) {
-        return;
-    }
+    let provider_allows_tools = config.provider_allows_tool_calls();
 
-    config.include_plan_tool = false;
-    config.include_apply_patch_tool = false;
-    config.include_view_image_tool = false;
-    config.tools_web_search_request = false;
+    let plan_enabled = provider_allows_tools
+        && config.include_plan_tool
+        && plan_tool_supported(
+            config.model_provider_id.as_str(),
+            Some(config.model.as_str()),
+        );
+    config.include_plan_tool = plan_enabled;
+    toggle_feature(&mut config.features, Feature::PlanTool, plan_enabled);
+
+    let apply_patch_enabled = provider_allows_tools && config.include_apply_patch_tool;
+    config.include_apply_patch_tool = apply_patch_enabled;
+    toggle_feature(
+        &mut config.features,
+        Feature::ApplyPatchFreeform,
+        apply_patch_enabled,
+    );
+
+    let view_image_enabled = provider_allows_tools && config.include_view_image_tool;
+    config.include_view_image_tool = view_image_enabled;
+    toggle_feature(
+        &mut config.features,
+        Feature::ViewImageTool,
+        view_image_enabled,
+    );
+
+    let web_search_enabled = provider_allows_tools && config.tools_web_search_request;
+    config.tools_web_search_request = web_search_enabled;
+    toggle_feature(
+        &mut config.features,
+        Feature::WebSearchRequest,
+        web_search_enabled,
+    );
+
+    if !provider_allows_tools {
+        config.use_experimental_streamable_shell_tool = false;
+        config.use_experimental_unified_exec_tool = false;
+        config.features.disable(Feature::StreamableShell);
+        config.features.disable(Feature::UnifiedExec);
+        config.features.disable(Feature::RmcpClient);
+    }
+}
+
+fn toggle_feature(features: &mut Features, feature: Feature, enabled: bool) {
+    if enabled {
+        features.enable(feature);
+    } else {
+        features.disable(feature);
+    }
 }
 
 #[derive(Deserialize)]
@@ -411,10 +464,18 @@ pub async fn fetch_custom_provider_models(
     let endpoint = format!("{}/models", base_url.trim_end_matches('/'));
 
     let client = create_client();
-    let response = client
+    let mut request = client
         .get(&endpoint)
         .bearer_auth(api_key)
-        .header("Accept", "application/json")
+        .header("Accept", "application/json");
+
+    if let Some(headers) = provider.extra_headers.as_ref() {
+        for (key, value) in headers {
+            request = request.header(key, value);
+        }
+    }
+
+    let response = request
         .send()
         .await
         .with_context(|| format!("failed to contact {endpoint} for provider {provider_id}"))?;

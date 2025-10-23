@@ -22,6 +22,7 @@ pub(crate) struct CustomProviderForm {
     pub provider_id: String,
     pub base_url: Option<String>,
     pub default_model: Option<String>,
+    pub extra_headers: Option<String>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -203,4 +204,5 @@ pub(crate) enum ByokDraftField {
     BaseUrl,
     DefaultModel,
     ApiKey,
+    ExtraHeaders,
 }

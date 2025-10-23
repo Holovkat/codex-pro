@@ -142,6 +142,8 @@ pub struct CustomProvider {
     pub cached_models: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_model_refresh: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_headers: Option<BTreeMap<String, String>>,
     #[serde(default)]
     pub plan_tool_enabled: bool,
 }
@@ -156,6 +158,7 @@ impl Default for CustomProvider {
             added_at: None,
             cached_models: None,
             last_model_refresh: None,
+            extra_headers: None,
             plan_tool_enabled: false,
         }
     }

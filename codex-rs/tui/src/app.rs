@@ -39,6 +39,8 @@ use codex_agentic_core::index::query::query_index;
 use codex_agentic_core::persist_default_model_selection;
 use codex_agentic_core::provider::DEFAULT_OPENAI_PROVIDER_ID;
 use codex_agentic_core::provider::OSS_PROVIDER_ID;
+use codex_agentic_core::provider::sanitize_reasoning_overrides;
+use codex_agentic_core::provider::sanitize_tool_overrides;
 use codex_agentic_core::settings;
 use codex_agentic_core::settings::Settings;
 use codex_ansi_escape::ansi_escape_line;
@@ -61,6 +63,7 @@ use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -95,6 +98,7 @@ struct ByokDraft {
     provider_id: String,
     base_url: Option<String>,
     default_model: Option<String>,
+    extra_headers: Option<String>,
     api_key: ApiKeyDraft,
     has_stored_api_key: bool,
     slug_locked: bool,
@@ -115,6 +119,7 @@ impl ByokDraft {
             provider_id: String::new(),
             base_url: None,
             default_model: None,
+            extra_headers: None,
             api_key: ApiKeyDraft::Unchanged,
             has_stored_api_key: false,
             slug_locked: false,
@@ -128,6 +133,10 @@ impl ByokDraft {
             provider_id: id.to_string(),
             base_url: provider.base_url.clone(),
             default_model: provider.default_model.clone(),
+            extra_headers: provider
+                .extra_headers
+                .as_ref()
+                .map(Self::format_extra_headers),
             api_key: ApiKeyDraft::Unchanged,
             has_stored_api_key: has_key,
             slug_locked: true,
@@ -166,6 +175,13 @@ impl ByokDraft {
                     self.default_model = Some(trimmed);
                 }
             }
+            ByokDraftField::ExtraHeaders => {
+                if trimmed.eq_ignore_ascii_case("!clear") || trimmed.is_empty() {
+                    self.extra_headers = None;
+                } else {
+                    self.extra_headers = Some(trimmed);
+                }
+            }
             ByokDraftField::ApiKey => {
                 if trimmed.eq_ignore_ascii_case("!clear") || trimmed.is_empty() {
                     self.api_key = ApiKeyDraft::Clear;
@@ -174,6 +190,14 @@ impl ByokDraft {
                 }
             }
         }
+    }
+
+    fn format_extra_headers(headers: &BTreeMap<String, String>) -> String {
+        headers
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     fn api_key_status_label(&self) -> &'static str {
@@ -213,6 +237,30 @@ fn is_valid_provider_id(id: &str) -> bool {
 
 fn is_reserved_provider_id(id: &str) -> bool {
     id == DEFAULT_OPENAI_PROVIDER_ID || id == OSS_PROVIDER_ID || matches!(id, "codex" | "ollama")
+}
+
+fn parse_extra_headers(value: &str) -> color_eyre::Result<BTreeMap<String, String>> {
+    let mut headers = BTreeMap::new();
+    for entry in value.split(',') {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let (key, val) = trimmed.split_once('=').ok_or_else(|| {
+            eyre!(
+                "Invalid header `{trimmed}`; expected key=value (comma separated for multiple entries)"
+            )
+        })?;
+        let key = key.trim();
+        let val = val.trim();
+        if key.is_empty() || val.is_empty() {
+            return Err(eyre!(
+                "Invalid header `{trimmed}`; key and value must be non-empty"
+            ));
+        }
+        headers.insert(key.to_string(), val.to_string());
+    }
+    Ok(headers)
 }
 
 fn normalize_custom_provider_base_url(
@@ -794,6 +842,8 @@ impl App {
                     self.config.model_provider_id = provider_id;
                     self.config.model_provider = info;
                     refresh_model_metadata(&mut self.config);
+                    sanitize_reasoning_overrides(&mut self.config);
+                    sanitize_tool_overrides(&mut self.config);
                     self.chat_widget.set_model_provider(
                         &self.config.model_provider_id,
                         &self.config.model_provider,
@@ -806,6 +856,8 @@ impl App {
                 self.chat_widget.set_model(&model);
                 self.config.model = model;
                 refresh_model_metadata(&mut self.config);
+                sanitize_reasoning_overrides(&mut self.config);
+                sanitize_tool_overrides(&mut self.config);
             }
             AppEvent::OpenReasoningPopup {
                 model,
@@ -1437,6 +1489,26 @@ impl App {
             ..Default::default()
         });
 
+        let extra_headers_display = draft
+            .extra_headers
+            .as_deref()
+            .map(str::to_string)
+            .unwrap_or_else(|| "<none>".to_string());
+        items.push(SelectionItem {
+            name: format!("Extra headers: {extra_headers_display}"),
+            description: Some(
+                "Optional request headers, comma-separated key=value (use !clear to remove)"
+                    .to_string(),
+            ),
+            actions: vec![Box::new(|tx: &AppEventSender| {
+                tx.send(AppEvent::BeginByokFieldEdit {
+                    field: ByokDraftField::ExtraHeaders,
+                });
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
         items.push(SelectionItem {
             name: format!("API key: {}", draft.api_key_status_label()),
             description: Some("Enter new key, !clear to remove, or Esc to keep".to_string()),
@@ -1454,6 +1526,7 @@ impl App {
             provider_id: draft.provider_id.clone(),
             base_url: draft.base_url.clone(),
             default_model: draft.default_model.clone(),
+            extra_headers: draft.extra_headers.clone(),
         };
 
         let original_id = draft.original_id.clone();
@@ -1530,6 +1603,14 @@ impl App {
                     .as_deref()
                     .map(|model| format!("Current: {model}")),
             ),
+            ByokDraftField::ExtraHeaders => (
+                "Extra headers".to_string(),
+                "Comma-separated key=value pairs or !clear".to_string(),
+                draft
+                    .extra_headers
+                    .as_deref()
+                    .map(|headers| format!("Current: {headers}")),
+            ),
             ByokDraftField::ApiKey => (
                 "API key".to_string(),
                 "Enter new key, !clear to remove, or Esc to keep".to_string(),
@@ -1544,7 +1625,10 @@ impl App {
             if trimmed.is_empty()
                 && !matches!(
                     field_for_event,
-                    ByokDraftField::BaseUrl | ByokDraftField::DefaultModel | ByokDraftField::ApiKey
+                    ByokDraftField::BaseUrl
+                        | ByokDraftField::DefaultModel
+                        | ByokDraftField::ExtraHeaders
+                        | ByokDraftField::ApiKey
                 )
             {
                 return;
@@ -1558,7 +1642,10 @@ impl App {
         let view = CustomPromptView::new(title, placeholder, context, on_submit)
             .with_allow_empty_submit(matches!(
                 field,
-                ByokDraftField::BaseUrl | ByokDraftField::DefaultModel | ByokDraftField::ApiKey
+                ByokDraftField::BaseUrl
+                    | ByokDraftField::DefaultModel
+                    | ByokDraftField::ExtraHeaders
+                    | ByokDraftField::ApiKey
             ));
         self.chat_widget.push_bottom_view(Box::new(view));
     }
@@ -1647,6 +1734,18 @@ impl App {
         provider.base_url = base_url;
         provider.wire_api = wire_api;
         provider.default_model = default_model;
+        provider.extra_headers = match form.extra_headers.as_ref().map(|s| s.trim()) {
+            None => provider.extra_headers.clone(),
+            Some(value) if value.eq_ignore_ascii_case("!clear") || value.is_empty() => None,
+            Some(value) => {
+                let parsed = parse_extra_headers(value)?;
+                if parsed.is_empty() {
+                    None
+                } else {
+                    Some(parsed)
+                }
+            }
+        };
         if provider.added_at.is_none() {
             provider.added_at = Some(Utc::now().to_rfc3339());
         }

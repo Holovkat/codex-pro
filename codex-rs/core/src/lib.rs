@@ -47,6 +47,7 @@ pub use model_provider_info::ModelProviderInfo;
 pub use model_provider_info::WireApi;
 pub use model_provider_info::built_in_model_providers;
 pub use model_provider_info::create_oss_provider_with_base_url;
+pub use model_provider_info::oss_model_supports_tools;
 pub use openai_model_info::get_model_info;
 mod conversation_manager;
 mod event_mapping;

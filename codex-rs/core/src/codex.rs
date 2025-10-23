@@ -452,7 +452,9 @@ impl Session {
             conversation_id,
             config.model.as_str(),
             config.model_family.slug.as_str(),
-            auth_snapshot.as_ref().and_then(|a| a.get_account_id()),
+            auth_snapshot
+                .as_ref()
+                .and_then(super::auth::CodexAuth::get_account_id),
             auth_snapshot.as_ref().map(|a| a.mode),
             config.otel.log_user_prompt,
             terminal::user_agent(),
@@ -487,6 +489,7 @@ impl Session {
             tools_config: ToolsConfig::new(&ToolsConfigParams {
                 model_family: &config.model_family,
                 features: &config.features,
+                allow_tools: config.provider_allows_tool_calls(),
             }),
             user_instructions,
             base_instructions,
@@ -1277,6 +1280,7 @@ async fn submission_loop(
                 let tools_config = ToolsConfig::new(&ToolsConfigParams {
                     model_family: &effective_family,
                     features: &config.features,
+                    allow_tools: config.provider_allows_tool_calls(),
                 });
 
                 let new_turn_context = TurnContext {
@@ -1374,6 +1378,7 @@ async fn submission_loop(
                         tools_config: ToolsConfig::new(&ToolsConfigParams {
                             model_family: &model_family,
                             features: &config.features,
+                            allow_tools: config.provider_allows_tool_calls(),
                         }),
                         user_instructions: turn_context.user_instructions.clone(),
                         base_instructions: turn_context.base_instructions.clone(),
@@ -1625,6 +1630,7 @@ async fn spawn_review_thread(
     let tools_config = ToolsConfig::new(&ToolsConfigParams {
         model_family: &review_model_family,
         features: &review_features,
+        allow_tools: config.provider_allows_tool_calls(),
     });
 
     let base_instructions = REVIEW_PROMPT.to_string();
@@ -2840,6 +2846,7 @@ mod tests {
         let tools_config = ToolsConfig::new(&ToolsConfigParams {
             model_family: &config.model_family,
             features: &config.features,
+            allow_tools: config.provider_allows_tool_calls(),
         });
         let turn_context = TurnContext {
             client,
@@ -2908,6 +2915,7 @@ mod tests {
         let tools_config = ToolsConfig::new(&ToolsConfigParams {
             model_family: &config.model_family,
             features: &config.features,
+            allow_tools: config.provider_allows_tool_calls(),
         });
         let turn_context = Arc::new(TurnContext {
             client,

@@ -1,5 +1,7 @@
+use std::sync::Arc;
 use std::time::Duration;
 
+use crate::AuthManager;
 use crate::ModelProviderInfo;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
@@ -12,6 +14,7 @@ use crate::error::RetryLimitReachedError;
 use crate::error::UnexpectedResponseError;
 use crate::model_family::ModelFamily;
 use crate::openai_tools::create_tools_json_for_chat_completions_api;
+use crate::protocol::TokenUsage;
 use crate::util::backoff;
 use bytes::Bytes;
 use codex_otel::otel_event_manager::OtelEventManager;
@@ -32,12 +35,26 @@ use tokio::time::timeout;
 use tracing::debug;
 use tracing::trace;
 
+fn provider_supports_streaming(provider: &ModelProviderInfo) -> bool {
+    provider
+        .base_url
+        .as_deref()
+        .map(|url| {
+            let lower = url.to_ascii_lowercase();
+            !(lower.contains("api.z.ai/api/coding/paas/")
+                || lower.contains("open.bigmodel.cn/api/coding/paas/"))
+        })
+        .unwrap_or(true)
+}
+
 /// Implementation for the classic Chat Completions API.
 pub(crate) async fn stream_chat_completions(
     prompt: &Prompt,
     model_family: &ModelFamily,
     client: &reqwest::Client,
     provider: &ModelProviderInfo,
+    provider_id: &str,
+    auth_manager: &Option<Arc<AuthManager>>,
     otel_event_manager: &OtelEventManager,
 ) -> Result<ResponseStream> {
     if prompt.output_schema.is_some() {
@@ -46,6 +63,8 @@ pub(crate) async fn stream_chat_completions(
         ));
     }
 
+    let supports_streaming = provider_supports_streaming(provider);
+
     // Build messages array
     let mut messages = Vec::<serde_json::Value>::new();
 
@@ -53,7 +72,6 @@ pub(crate) async fn stream_chat_completions(
     messages.push(json!({"role": "system", "content": full_instructions}));
 
     let input = prompt.get_formatted_input();
-
     // Pre-scan: map Reasoning blocks to the adjacent assistant anchor after the last user.
     // - If the last emitted message is a user message, drop all reasoning.
     // - Otherwise, for each Reasoning item after the last user message, attach it
@@ -278,6 +296,20 @@ pub(crate) async fn stream_chat_completions(
         }
     }
 
+    if !supports_streaming {
+        return chat_completions_non_streaming(
+            prompt,
+            model_family,
+            client,
+            provider,
+            provider_id,
+            auth_manager,
+            otel_event_manager,
+            messages,
+        )
+        .await;
+    }
+
     let tools_json = create_tools_json_for_chat_completions_api(&prompt.tools)?;
     let payload = json!({
         "model": model_family.slug,
@@ -286,18 +318,22 @@ pub(crate) async fn stream_chat_completions(
         "tools": tools_json,
     });
 
-    debug!(
-        "POST to {}: {}",
-        provider.get_full_url(&None),
-        serde_json::to_string_pretty(&payload).unwrap_or_default()
-    );
-
     let mut attempt = 0;
     let max_retries = provider.request_max_retries();
     loop {
         attempt += 1;
 
-        let req_builder = provider.create_request_builder(client, &None).await?;
+        let auth = auth_manager.as_ref().and_then(|manager| {
+            manager.auth_for_provider(provider_id, provider.requires_openai_auth)
+        });
+
+        debug!(
+            "POST to {}: {}",
+            provider.get_full_url(&auth),
+            serde_json::to_string_pretty(&payload).unwrap_or_default()
+        );
+
+        let req_builder = provider.create_request_builder(client, &auth).await?;
 
         let res = otel_event_manager
             .log_request(attempt, || {
@@ -365,6 +401,270 @@ pub(crate) async fn stream_chat_completions(
             }
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn chat_completions_non_streaming(
+    prompt: &Prompt,
+    model_family: &ModelFamily,
+    client: &reqwest::Client,
+    provider: &ModelProviderInfo,
+    provider_id: &str,
+    auth_manager: &Option<Arc<AuthManager>>,
+    otel_event_manager: &OtelEventManager,
+    messages: Vec<serde_json::Value>,
+) -> Result<ResponseStream> {
+    let tools_json = create_tools_json_for_chat_completions_api(&prompt.tools)?;
+    let payload = json!({
+        "model": model_family.slug,
+        "messages": messages,
+        "stream": false,
+        "tools": tools_json,
+    });
+
+    let mut attempt = 0;
+    let max_retries = provider.request_max_retries();
+    loop {
+        attempt += 1;
+        let auth = auth_manager.as_ref().and_then(|manager| {
+            manager.auth_for_provider(provider_id, provider.requires_openai_auth)
+        });
+
+        debug!(
+            "POST (non-streaming) to {}: {}",
+            provider.get_full_url(&auth),
+            serde_json::to_string_pretty(&payload).unwrap_or_default()
+        );
+
+        let req_builder = provider.create_request_builder(client, &auth).await?;
+
+        let res = otel_event_manager
+            .log_request(attempt, || {
+                req_builder
+                    .header(reqwest::header::ACCEPT, "application/json")
+                    .json(&payload)
+                    .send()
+            })
+            .await;
+
+        match res {
+            Ok(resp) if resp.status().is_success() => {
+                let body: serde_json::Value = resp.json().await.map_err(|source| {
+                    CodexErr::ConnectionFailed(ConnectionFailedError { source })
+                })?;
+
+                let response_id = body
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+
+                let choice = body
+                    .get("choices")
+                    .and_then(|c| c.as_array())
+                    .and_then(|arr| arr.first())
+                    .cloned()
+                    .ok_or_else(|| {
+                        CodexErr::UnexpectedStatus(UnexpectedResponseError {
+                            status: StatusCode::OK,
+                            body: "chat completions response missing choices".to_string(),
+                            request_id: body
+                                .get("request_id")
+                                .and_then(|v| v.as_str())
+                                .map(std::string::ToString::to_string),
+                        })
+                    })?;
+
+                let response_items = parse_non_streaming_response_items(&choice);
+                let token_usage = body.get("usage").and_then(parse_token_usage);
+
+                let (tx, rx) = mpsc::channel::<Result<ResponseEvent>>(4);
+                for item in response_items {
+                    let _ = tx.send(Ok(ResponseEvent::OutputItemDone(item))).await;
+                }
+                let _ = tx
+                    .send(Ok(ResponseEvent::Completed {
+                        response_id,
+                        token_usage,
+                    }))
+                    .await;
+                drop(tx);
+                return Ok(ResponseStream { rx_event: rx });
+            }
+            Ok(res) => {
+                let status = res.status();
+                if !(status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()) {
+                    let body = (res.text().await).unwrap_or_default();
+                    return Err(CodexErr::UnexpectedStatus(UnexpectedResponseError {
+                        status,
+                        body,
+                        request_id: None,
+                    }));
+                }
+
+                if attempt > max_retries {
+                    return Err(CodexErr::RetryLimit(RetryLimitReachedError {
+                        status,
+                        request_id: None,
+                    }));
+                }
+
+                let retry_after_secs = res
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok());
+
+                let delay = retry_after_secs
+                    .map(|s| Duration::from_millis(s * 1_000))
+                    .unwrap_or_else(|| backoff(attempt));
+                tokio::time::sleep(delay).await;
+            }
+            Err(e) => {
+                if attempt > max_retries {
+                    return Err(CodexErr::ConnectionFailed(ConnectionFailedError {
+                        source: e,
+                    }));
+                }
+                let delay = backoff(attempt);
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+}
+
+fn parse_non_streaming_response_items(choice: &serde_json::Value) -> Vec<ResponseItem> {
+    let mut items = Vec::new();
+
+    let message_map = choice
+        .get("message")
+        .and_then(|m| m.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    if let Some(reasoning_value) = message_map.get("reasoning_content")
+        && let Some(reasoning_text) = collect_text_field(reasoning_value)
+    {
+        items.push(ResponseItem::Reasoning {
+            id: String::new(),
+            summary: Vec::new(),
+            content: Some(vec![ReasoningItemContent::ReasoningText {
+                text: reasoning_text,
+            }]),
+            encrypted_content: None,
+        });
+    }
+
+    if let Some(tool_calls) = message_map.get("tool_calls").and_then(|tc| tc.as_array()) {
+        for call in tool_calls {
+            let function = call.get("function").and_then(|f| f.as_object());
+            let name = function
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let arguments_value = function.and_then(|f| f.get("arguments"));
+            let arguments = arguments_value
+                .map(|value| match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+                .unwrap_or_else(|| "{}".to_string());
+            let call_id = call
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+
+            items.push(ResponseItem::FunctionCall {
+                id: None,
+                name,
+                arguments,
+                call_id,
+            });
+        }
+    }
+
+    if let Some(content_value) = message_map.get("content")
+        && let Some(text) = collect_text_field(content_value)
+    {
+        items.push(ResponseItem::Message {
+            id: None,
+            role: message_map
+                .get("role")
+                .and_then(|r| r.as_str())
+                .unwrap_or("assistant")
+                .to_string(),
+            content: vec![ContentItem::OutputText { text }],
+        });
+    }
+
+    items
+}
+
+fn collect_text_field(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => {
+            if s.trim().is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        }
+        serde_json::Value::Array(parts) => {
+            let mut buf = String::new();
+            for part in parts {
+                if let Some(s) = part.get("text").and_then(|v| v.as_str()) {
+                    buf.push_str(s);
+                } else if let Some(s) = part.get("content").and_then(|v| v.as_str()) {
+                    buf.push_str(s);
+                } else if let Some(s) = part.get("string_value").and_then(|v| v.as_str()) {
+                    buf.push_str(s);
+                } else if let Some(s) = part.as_str() {
+                    buf.push_str(s);
+                }
+            }
+            if buf.trim().is_empty() {
+                None
+            } else {
+                Some(buf)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn parse_token_usage(usage: &serde_json::Value) -> Option<TokenUsage> {
+    let input_tokens = usage
+        .get("prompt_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let cached = usage
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let output_tokens = usage
+        .get("completion_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let reasoning_tokens = usage
+        .get("completion_tokens_details")
+        .and_then(|d| d.get("reasoning_tokens"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let total_tokens = usage
+        .get("total_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_else(|| input_tokens + output_tokens);
+
+    Some(TokenUsage {
+        input_tokens,
+        cached_input_tokens: cached,
+        output_tokens,
+        reasoning_output_tokens: reasoning_tokens,
+        total_tokens,
+    })
 }
 
 /// Lightweight SSE processor for the Chat Completions streaming format. The
