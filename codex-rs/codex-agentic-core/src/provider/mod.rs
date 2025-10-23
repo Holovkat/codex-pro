@@ -2,6 +2,7 @@ use anyhow::Context;
 use anyhow::Result;
 use codex_core::ModelProviderInfo;
 use codex_core::config::Config;
+use codex_core::config_types::ProviderKind;
 use codex_core::default_client::create_client;
 use codex_core::features::Feature;
 use codex_core::features::Features;
@@ -47,6 +48,13 @@ fn is_zai_base_url(url: &str) -> bool {
 }
 
 fn oss_endpoint(settings: &Settings) -> String {
+    if let Some(provider) = settings
+        .custom_provider("ollama")
+        .and_then(|provider| provider.base_url.clone())
+    {
+        return provider;
+    }
+
     settings
         .providers
         .as_ref()
@@ -306,7 +314,7 @@ pub fn custom_providers(settings: &Settings) -> BTreeMap<String, CustomProvider>
 pub fn custom_provider_model_info(provider_id: &str, custom: &CustomProvider) -> ModelProviderInfo {
     let mut info = ModelProviderInfo {
         name: custom.name.clone(),
-        base_url: custom.base_url.clone(),
+        base_url: None,
         env_key: None,
         env_key_instructions: None,
         wire_api: custom.wire_api(),
@@ -317,6 +325,25 @@ pub fn custom_provider_model_info(provider_id: &str, custom: &CustomProvider) ->
         stream_max_retries: None,
         stream_idle_timeout_ms: None,
         requires_openai_auth: false,
+        provider_kind: custom.provider_kind,
+        reasoning_controls: custom.reasoning_controls.clone(),
+    };
+
+    info.base_url = match custom.provider_kind {
+        ProviderKind::Ollama => {
+            let root = custom
+                .base_url
+                .clone()
+                .unwrap_or_else(|| DEFAULT_OLLAMA_ENDPOINT.to_string());
+            let trimmed = root.trim_end_matches('/');
+            let chat_base = if let Some(stripped) = trimmed.strip_suffix("/v1") {
+                stripped.to_string()
+            } else {
+                trimmed.to_string()
+            };
+            Some(format!("{}/v1", chat_base))
+        }
+        _ => custom.base_url.clone(),
     };
 
     if matches!(info.wire_api, WireApi::Responses)
@@ -376,7 +403,7 @@ fn needs_coding_plan_chat_mode(provider_id: &str, info: &ModelProviderInfo) -> b
         || info
             .base_url
             .as_deref()
-            .map(|url| is_zai_base_url(url))
+            .map(is_zai_base_url)
             .unwrap_or(false)
 }
 
@@ -455,15 +482,77 @@ struct ModelEntry {
 pub async fn fetch_custom_provider_models(
     provider_id: &str,
     provider: &CustomProvider,
-    api_key: &str,
+    api_key: Option<&str>,
 ) -> Result<Vec<String>> {
+    let client = create_client();
+
+    if matches!(provider.provider_kind, ProviderKind::Ollama) {
+        let base_url = provider
+            .base_url
+            .clone()
+            .unwrap_or_else(|| DEFAULT_OLLAMA_ENDPOINT.to_string());
+        let trimmed = base_url.trim_end_matches('/');
+        let host = trimmed
+            .strip_suffix("/v1")
+            .unwrap_or(trimmed)
+            .trim_end_matches('/');
+        let endpoint = format!("{host}/api/tags");
+
+        let mut request = client.get(&endpoint);
+        if let Some(headers) = provider.extra_headers.as_ref() {
+            for (key, value) in headers {
+                request = request.header(key, value);
+            }
+        }
+
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("failed to contact {endpoint} for provider {provider_id}"))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "provider {provider_id} returned {status} when listing models: {body}"
+            ));
+        }
+
+        let value = response.json::<JsonValue>().await.with_context(|| {
+            format!("failed to parse /api/tags response for provider {provider_id}")
+        })?;
+
+        let mut models: Vec<String> = value
+            .get("models")
+            .and_then(|models| models.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        item.get("name")
+                            .or_else(|| item.get("model"))
+                            .and_then(|v| v.as_str())
+                    })
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        models.sort();
+        models.dedup();
+        return Ok(models);
+    }
+
+    let api_key = api_key.ok_or_else(|| {
+        anyhow::anyhow!("provider {provider_id} requires an API key to refresh cached models")
+    })?;
+
     let base_url = provider
         .base_url
         .clone()
         .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
     let endpoint = format!("{}/models", base_url.trim_end_matches('/'));
 
-    let client = create_client();
     let mut request = client
         .get(&endpoint)
         .bearer_auth(api_key)

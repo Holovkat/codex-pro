@@ -95,7 +95,6 @@ fn upgrade_event_payload_for_tests(mut payload: serde_json::Value) -> serde_json
                 .collect();
             let parsed_cmd: Vec<ParsedCommand> = codex_core::parse_command::parse_command(&cmd_vec)
                 .into_iter()
-                .map(Into::into)
                 .collect();
             let value = serde_json::to_value(parsed_cmd)
                 .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));

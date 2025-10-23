@@ -8,6 +8,8 @@ use codex_core::Prompt;
 use codex_core::ResponseEvent;
 use codex_core::ResponseItem;
 use codex_core::WireApi;
+use codex_core::config_types::ProviderKind;
+use codex_core::config_types::ProviderReasoningControls;
 use codex_otel::otel_event_manager::OtelEventManager;
 use codex_protocol::ConversationId;
 use core_test_support::load_default_config_for_test;
@@ -46,6 +48,8 @@ async fn responses_stream_includes_task_type_header() {
         stream_max_retries: Some(0),
         stream_idle_timeout_ms: Some(5_000),
         requires_openai_auth: false,
+        provider_kind: ProviderKind::OpenAiResponses,
+        reasoning_controls: ProviderReasoningControls::default(),
     };
 
     let codex_home = TempDir::new().expect("failed to create TempDir");
@@ -62,7 +66,6 @@ async fn responses_stream_includes_task_type_header() {
         conversation_id,
         config.model.as_str(),
         config.model_family.slug.as_str(),
-        None,
         Some("test@test.com".to_string()),
         Some(AuthMode::ChatGPT),
         false,

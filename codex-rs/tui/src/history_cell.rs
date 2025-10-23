@@ -164,24 +164,33 @@ impl ReasoningSummaryCell {
             &mut lines,
             self.citation_context.clone(),
         );
-        let summary_style = Style::default().dim().italic();
+
+        let reasoning_style = Style::default()
+            .fg(Color::Indexed(247))
+            .add_modifier(Modifier::ITALIC)
+            .add_modifier(Modifier::DIM);
         let summary_lines = lines
             .into_iter()
             .map(|mut line| {
                 line.spans = line
                     .spans
                     .into_iter()
-                    .map(|span| span.patch_style(summary_style))
+                    .map(|span| span.patch_style(reasoning_style))
                     .collect();
                 line
             })
             .collect::<Vec<_>>();
 
+        let initial_indent =
+            Line::from(vec![Span::styled("• ", reasoning_style)]).style(reasoning_style);
+        let subsequent_indent =
+            Line::from(vec![Span::styled("  ", reasoning_style)]).style(reasoning_style);
+
         word_wrap_lines(
             &summary_lines,
             RtOptions::new(width as usize)
-                .initial_indent("• ".dim().into())
-                .subsequent_indent("  ".into()),
+                .initial_indent(initial_indent)
+                .subsequent_indent(subsequent_indent),
         )
     }
 }

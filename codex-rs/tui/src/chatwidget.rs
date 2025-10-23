@@ -3,7 +3,6 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use codex_agentic_core::OSS_PROVIDER_ID;
 use codex_agentic_core::list_models_for_provider_blocking;
 use codex_agentic_core::provider::DEFAULT_OPENAI_PROVIDER_ID;
 use codex_agentic_core::provider::plan_tool_supported;
@@ -1678,27 +1677,6 @@ impl ChatWidget {
                 .push(preset);
         }
 
-        provider_labels.insert(OSS_PROVIDER_ID.to_string(), "Ollama".to_string());
-        match list_models_for_provider_blocking(&settings::global(), OSS_PROVIDER_ID) {
-            Ok(models) => {
-                for model in models {
-                    grouped
-                        .entry((OSS_PROVIDER_ID.to_string(), model.clone()))
-                        .or_default()
-                        .push(ModelPreset {
-                            id: format!("oss:{model}"),
-                            label: model.clone(),
-                            description: "Local Ollama model".to_string(),
-                            model,
-                            effort: None,
-                        });
-                }
-            }
-            Err(err) => {
-                self.add_error_message(format!("Failed to list local models: {err}"));
-            }
-        }
-
         let settings_snapshot = settings::global();
         for (provider_id, provider) in settings_snapshot.custom_providers() {
             let label = if provider.name.trim().is_empty() {
@@ -1708,45 +1686,48 @@ impl ChatWidget {
             };
             provider_labels.insert(provider_id.clone(), label.clone());
 
-            let mut models: Vec<String> = provider
-                .cached_models
-                .clone()
-                .unwrap_or_else(|| provider.default_model.iter().cloned().collect());
-            models.sort();
-            models.dedup();
-            if models.is_empty() {
-                let provider_id_for_edit = provider_id.clone();
-                let provider_label = label.clone();
-                placeholder_items.push(SelectionItem {
-                    name: format!("{provider_label} [Custom Providers]"),
-                    description: Some(
-                        "No models cached yet. Edit the provider in /BYOK to add a default model or refresh."
-                            .to_string(),
-                    ),
-                    is_current: false,
-                    actions: vec![Box::new(move |tx| {
-                        tx.send(AppEvent::StartByokEdit {
-                            existing_id: Some(provider_id_for_edit.clone()),
-                        });
-                    })],
-                    dismiss_on_select: true,
-                    search_value: Some(format!("{provider_label} {provider_id}")),
-                    ..Default::default()
-                });
-                continue;
-            }
-
-            for model in models {
-                grouped
-                    .entry((provider_id.clone(), model.clone()))
-                    .or_default()
-                    .push(ModelPreset {
-                        id: format!("{provider_id}:{model}"),
-                        label: model.clone(),
-                        description: "Custom provider model".to_string(),
-                        model,
-                        effort: None,
+            match list_models_for_provider_blocking(&settings_snapshot, provider_id) {
+                Ok(mut models) if !models.is_empty() => {
+                    models.sort();
+                    models.dedup();
+                    for model in models {
+                        grouped
+                            .entry((provider_id.clone(), model.clone()))
+                            .or_default()
+                            .push(ModelPreset {
+                                id: format!("{provider_id}:{model}"),
+                                label: model.clone(),
+                                description: format!("Custom provider `{label}`"),
+                                model,
+                                effort: None,
+                            });
+                    }
+                }
+                Ok(_) => {
+                    let provider_id_for_edit = provider_id.clone();
+                    let provider_label = label.clone();
+                    placeholder_items.push(SelectionItem {
+                        name: format!("{provider_label} [Custom Providers]"),
+                        description: Some(
+                            "No models cached yet. Edit the provider in /BYOK to add a default model or refresh."
+                                .to_string(),
+                        ),
+                        is_current: false,
+                        actions: vec![Box::new(move |tx| {
+                            tx.send(AppEvent::StartByokEdit {
+                                existing_id: Some(provider_id_for_edit.clone()),
+                            });
+                        })],
+                        dismiss_on_select: true,
+                        search_value: Some(format!("{provider_label} {provider_id}")),
+                        ..Default::default()
                     });
+                }
+                Err(err) => {
+                    self.add_error_message(format!(
+                        "Failed to list models for `{provider_id}`: {err}"
+                    ));
+                }
             }
         }
 

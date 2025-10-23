@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use codex_core::ModelProviderInfo;
 use codex_core::WireApi;
+use codex_core::config_types::ProviderKind;
+use codex_core::config_types::ProviderReasoningControls;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::InputItem;
 use codex_core::protocol::Op;
@@ -82,6 +84,8 @@ async fn retries_on_early_close() {
         stream_max_retries: Some(1),
         stream_idle_timeout_ms: Some(2000),
         requires_openai_auth: false,
+        provider_kind: ProviderKind::OpenAiResponses,
+        reasoning_controls: ProviderReasoningControls::default(),
     };
 
     let TestCodex { codex, .. } = test_codex()

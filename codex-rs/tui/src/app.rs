@@ -37,6 +37,7 @@ use codex_agentic_core::index::events::IndexEvent as CoreIndexEvent;
 use codex_agentic_core::index::query::QueryHit;
 use codex_agentic_core::index::query::query_index;
 use codex_agentic_core::persist_default_model_selection;
+use codex_agentic_core::provider::DEFAULT_OLLAMA_ENDPOINT;
 use codex_agentic_core::provider::DEFAULT_OPENAI_PROVIDER_ID;
 use codex_agentic_core::provider::OSS_PROVIDER_ID;
 use codex_agentic_core::provider::sanitize_reasoning_overrides;
@@ -50,6 +51,7 @@ use codex_core::WireApi;
 use codex_core::config::Config;
 use codex_core::config::OPENAI_DEFAULT_MODEL;
 use codex_core::config::persist_model_selection;
+use codex_core::config_types::ProviderKind;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::SessionSource;
 use codex_core::protocol::TokenUsage;
@@ -99,6 +101,11 @@ struct ByokDraft {
     base_url: Option<String>,
     default_model: Option<String>,
     extra_headers: Option<String>,
+    provider_kind: ProviderKind,
+    think_enabled: bool,
+    postprocess_reasoning: bool,
+    anthropic_budget_tokens: Option<u32>,
+    anthropic_budget_weight: Option<f32>,
     api_key: ApiKeyDraft,
     has_stored_api_key: bool,
     slug_locked: bool,
@@ -120,6 +127,11 @@ impl ByokDraft {
             base_url: None,
             default_model: None,
             extra_headers: None,
+            provider_kind: ProviderKind::OpenAiResponses,
+            think_enabled: false,
+            postprocess_reasoning: true,
+            anthropic_budget_tokens: None,
+            anthropic_budget_weight: None,
             api_key: ApiKeyDraft::Unchanged,
             has_stored_api_key: false,
             slug_locked: false,
@@ -137,13 +149,18 @@ impl ByokDraft {
                 .extra_headers
                 .as_ref()
                 .map(Self::format_extra_headers),
+            provider_kind: provider.provider_kind,
+            think_enabled: provider.reasoning_controls.think_enabled,
+            postprocess_reasoning: provider.reasoning_controls.postprocess_reasoning,
+            anthropic_budget_tokens: provider.reasoning_controls.anthropic_budget_tokens,
+            anthropic_budget_weight: provider.reasoning_controls.anthropic_budget_weight,
             api_key: ApiKeyDraft::Unchanged,
             has_stored_api_key: has_key,
             slug_locked: true,
         }
     }
 
-    fn apply_field(&mut self, field: ByokDraftField, value: String) {
+    fn apply_field(&mut self, field: ByokDraftField, value: String) -> Result<(), String> {
         let trimmed = value.trim().to_string();
         match field {
             ByokDraftField::Name => {
@@ -189,7 +206,31 @@ impl ByokDraft {
                     self.api_key = ApiKeyDraft::Set(trimmed);
                 }
             }
+            ByokDraftField::AnthropicBudgetTokens => {
+                if trimmed.eq_ignore_ascii_case("!clear") || trimmed.is_empty() {
+                    self.anthropic_budget_tokens = None;
+                } else {
+                    let parsed = trimmed
+                        .parse::<u32>()
+                        .map_err(|_| "Enter a whole number of tokens".to_string())?;
+                    self.anthropic_budget_tokens = Some(parsed);
+                }
+            }
+            ByokDraftField::AnthropicBudgetWeight => {
+                if trimmed.eq_ignore_ascii_case("!clear") || trimmed.is_empty() {
+                    self.anthropic_budget_weight = None;
+                } else {
+                    let parsed = trimmed
+                        .parse::<f32>()
+                        .map_err(|_| "Enter a numeric weight (e.g. 0.5)".to_string())?;
+                    if parsed.is_sign_negative() {
+                        return Err("Weight must be non-negative".to_string());
+                    }
+                    self.anthropic_budget_weight = Some(parsed);
+                }
+            }
         }
+        Ok(())
     }
 
     fn format_extra_headers(headers: &BTreeMap<String, String>) -> String {
@@ -207,6 +248,62 @@ impl ByokDraft {
             (ApiKeyDraft::Unchanged, true) => "Stored",
             (ApiKeyDraft::Unchanged, false) => "Not stored",
         }
+    }
+
+    fn set_provider_kind(&mut self, kind: ProviderKind) {
+        self.provider_kind = kind;
+        match kind {
+            ProviderKind::OpenAiResponses => {
+                self.think_enabled = false;
+                self.postprocess_reasoning = true;
+                self.anthropic_budget_tokens = None;
+                self.anthropic_budget_weight = None;
+            }
+            ProviderKind::Ollama => {
+                self.anthropic_budget_tokens = None;
+                self.anthropic_budget_weight = None;
+                if !self.postprocess_reasoning {
+                    self.postprocess_reasoning = true;
+                }
+            }
+            ProviderKind::AnthropicClaude => {
+                self.think_enabled = false;
+                self.postprocess_reasoning = true;
+            }
+        }
+        if kind != ProviderKind::AnthropicClaude {
+            self.anthropic_budget_tokens = None;
+            self.anthropic_budget_weight = None;
+        }
+    }
+
+    fn cycle_provider_kind(&mut self) {
+        let next = match self.provider_kind {
+            ProviderKind::OpenAiResponses => ProviderKind::Ollama,
+            ProviderKind::Ollama => ProviderKind::AnthropicClaude,
+            ProviderKind::AnthropicClaude => ProviderKind::OpenAiResponses,
+        };
+        self.set_provider_kind(next);
+    }
+
+    fn toggle_think(&mut self) {
+        if self.provider_kind == ProviderKind::Ollama {
+            self.think_enabled = !self.think_enabled;
+        }
+    }
+
+    fn toggle_postprocess(&mut self) {
+        if self.provider_kind == ProviderKind::Ollama {
+            self.postprocess_reasoning = !self.postprocess_reasoning;
+        }
+    }
+}
+
+fn provider_kind_label(kind: ProviderKind) -> &'static str {
+    match kind {
+        ProviderKind::OpenAiResponses => "OpenAI Responses",
+        ProviderKind::Ollama => "Ollama",
+        ProviderKind::AnthropicClaude => "Anthropic Claude",
     }
 }
 
@@ -938,6 +1035,21 @@ impl App {
             AppEvent::UpdateByokDraftField { field, value } => {
                 self.update_byok_draft_field(field, value);
             }
+            AppEvent::CycleByokProviderKind => {
+                self.cycle_byok_provider_kind();
+            }
+            AppEvent::ToggleByokThink => {
+                self.toggle_byok_think();
+            }
+            AppEvent::ToggleByokPostprocess => {
+                self.toggle_byok_postprocess();
+            }
+            AppEvent::RefreshByokProviderModels { provider_id } => {
+                self.refresh_byok_provider_models(&provider_id);
+            }
+            AppEvent::ShowByokProviderModels { provider_id } => {
+                self.show_byok_provider_models(&provider_id);
+            }
             AppEvent::SubmitByokForm { original_id, form } => {
                 if let Err(err) = self.submit_byok_form(original_id, form) {
                     self.chat_widget
@@ -1236,6 +1348,10 @@ impl App {
             };
 
             let mut details: Vec<String> = Vec::new();
+            details.push(format!(
+                "Kind: {}",
+                provider_kind_label(provider.provider_kind)
+            ));
             if let Some(url) = provider.base_url.as_deref() {
                 details.push(url.to_string());
             }
@@ -1323,6 +1439,10 @@ impl App {
         };
 
         let mut description_parts: Vec<String> = Vec::new();
+        description_parts.push(format!(
+            "Kind: {}",
+            provider_kind_label(provider.provider_kind)
+        ));
         if let Some(url) = provider.base_url.as_deref() {
             description_parts.push(url.to_string());
         }
@@ -1337,6 +1457,8 @@ impl App {
 
         let provider_id_for_edit = provider_id.to_string();
         let provider_id_for_delete = provider_id.to_string();
+        let provider_id_for_refresh = provider_id.to_string();
+        let provider_id_for_models = provider_id.to_string();
 
         let mut items = vec![SelectionItem {
             name: "Edit provider".to_string(),
@@ -1349,6 +1471,30 @@ impl App {
             dismiss_on_select: true,
             ..Default::default()
         }];
+
+        items.push(SelectionItem {
+            name: "Refresh models".to_string(),
+            description: Some("Test connectivity and update the cached model list.".to_string()),
+            actions: vec![Box::new(move |tx: &AppEventSender| {
+                tx.send(AppEvent::RefreshByokProviderModels {
+                    provider_id: provider_id_for_refresh.clone(),
+                });
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        items.push(SelectionItem {
+            name: "View cached models".to_string(),
+            description: Some("Show cached models and default selection.".to_string()),
+            actions: vec![Box::new(move |tx: &AppEventSender| {
+                tx.send(AppEvent::ShowByokProviderModels {
+                    provider_id: provider_id_for_models.clone(),
+                });
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
 
         items.push(SelectionItem {
             name: "Delete provider".to_string(),
@@ -1455,11 +1601,118 @@ impl App {
             ..Default::default()
         });
 
+        let provider_kind_display = provider_kind_label(draft.provider_kind);
+        items.push(SelectionItem {
+            name: format!("Provider kind: {provider_kind_display}"),
+            description: Some("Cycle between supported providers".to_string()),
+            actions: vec![Box::new(|tx: &AppEventSender| {
+                tx.send(AppEvent::CycleByokProviderKind);
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        if draft.provider_kind == ProviderKind::Ollama {
+            let think_label = if draft.think_enabled {
+                "Enabled"
+            } else {
+                "Disabled"
+            };
+            items.push(SelectionItem {
+                name: format!("Ollama thinking: {think_label}"),
+                description: Some("Toggle the Ollama `think` request flag".to_string()),
+                actions: vec![Box::new(|tx: &AppEventSender| {
+                    tx.send(AppEvent::ToggleByokThink);
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            });
+
+            let postprocess_label = if draft.postprocess_reasoning {
+                "Enabled"
+            } else {
+                "Disabled"
+            };
+            items.push(SelectionItem {
+                name: format!("Post-process reasoning: {postprocess_label}"),
+                description: Some(
+                    "Strip <think> blocks from output and emit reasoning events".to_string(),
+                ),
+                actions: vec![Box::new(|tx: &AppEventSender| {
+                    tx.send(AppEvent::ToggleByokPostprocess);
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            });
+
+            items.push(SelectionItem {
+                name: "Tip: run `ollama pull` before refreshing".to_string(),
+                display_shortcut: None,
+                description: Some(
+                    "Model refresh uses the Ollama `/api/tags` endpoint to list models."
+                        .to_string(),
+                ),
+                is_current: false,
+                actions: Vec::new(),
+                dismiss_on_select: false,
+                search_value: None,
+            });
+        }
+
+        if draft.provider_kind == ProviderKind::AnthropicClaude {
+            let tokens_display = draft
+                .anthropic_budget_tokens
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "<unset>".to_string());
+            items.push(SelectionItem {
+                name: format!("Thinking tokens: {tokens_display}"),
+                description: Some("Optional max tokens for Anthropic thinking budget".to_string()),
+                actions: vec![Box::new(|tx: &AppEventSender| {
+                    tx.send(AppEvent::BeginByokFieldEdit {
+                        field: ByokDraftField::AnthropicBudgetTokens,
+                    });
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            });
+
+            let weight_display = draft
+                .anthropic_budget_weight
+                .map(|value| format!("{value:.2}"))
+                .unwrap_or_else(|| "<unset>".to_string());
+            items.push(SelectionItem {
+                name: format!("Thinking weight: {weight_display}"),
+                description: Some("Optional budget weight (0.0 - 1.0)".to_string()),
+                actions: vec![Box::new(|tx: &AppEventSender| {
+                    tx.send(AppEvent::BeginByokFieldEdit {
+                        field: ByokDraftField::AnthropicBudgetWeight,
+                    });
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            });
+
+            items.push(SelectionItem {
+                name: "Requires an Anthropic Claude API key".to_string(),
+                display_shortcut: None,
+                description: Some(
+                    "Set thinking budgets to cap Claude's hidden reasoning output.".to_string(),
+                ),
+                is_current: false,
+                actions: Vec::new(),
+                dismiss_on_select: false,
+                search_value: None,
+            });
+        }
+
         let base_url_display = draft
             .base_url
             .as_deref()
             .map(str::to_string)
-            .unwrap_or_else(|| "Using https://api.openai.com/v1".to_string());
+            .unwrap_or_else(|| match draft.provider_kind {
+                ProviderKind::Ollama => DEFAULT_OLLAMA_ENDPOINT.to_string(),
+                _ => "Using https://api.openai.com/v1".to_string(),
+            });
         items.push(SelectionItem {
             name: format!("Base URL: {base_url_display}"),
             description: Some("Enter !clear to reset to default".to_string()),
@@ -1527,6 +1780,11 @@ impl App {
             base_url: draft.base_url.clone(),
             default_model: draft.default_model.clone(),
             extra_headers: draft.extra_headers.clone(),
+            provider_kind: draft.provider_kind,
+            think_enabled: draft.think_enabled,
+            postprocess_reasoning: draft.postprocess_reasoning,
+            anthropic_budget_tokens: draft.anthropic_budget_tokens,
+            anthropic_budget_weight: draft.anthropic_budget_weight,
         };
 
         let original_id = draft.original_id.clone();
@@ -1616,6 +1874,20 @@ impl App {
                 "Enter new key, !clear to remove, or Esc to keep".to_string(),
                 None,
             ),
+            ByokDraftField::AnthropicBudgetTokens => (
+                "Thinking budget tokens".to_string(),
+                "Enter max thinking tokens or !clear".to_string(),
+                draft
+                    .anthropic_budget_tokens
+                    .map(|tokens| format!("Current: {tokens}")),
+            ),
+            ByokDraftField::AnthropicBudgetWeight => (
+                "Thinking budget weight".to_string(),
+                "Enter weight (0.0 - 1.0) or !clear".to_string(),
+                draft
+                    .anthropic_budget_weight
+                    .map(|weight| format!("Current: {weight}")),
+            ),
         };
 
         let field_for_event = field;
@@ -1629,6 +1901,8 @@ impl App {
                         | ByokDraftField::DefaultModel
                         | ByokDraftField::ExtraHeaders
                         | ByokDraftField::ApiKey
+                        | ByokDraftField::AnthropicBudgetTokens
+                        | ByokDraftField::AnthropicBudgetWeight
                 )
             {
                 return;
@@ -1646,17 +1920,195 @@ impl App {
                     | ByokDraftField::DefaultModel
                     | ByokDraftField::ExtraHeaders
                     | ByokDraftField::ApiKey
+                    | ByokDraftField::AnthropicBudgetTokens
+                    | ByokDraftField::AnthropicBudgetWeight
             ));
         self.chat_widget.push_bottom_view(Box::new(view));
     }
 
     fn update_byok_draft_field(&mut self, field: ByokDraftField, value: String) {
         if let Some(draft) = self.byok_draft.as_mut() {
-            draft.apply_field(field, value);
+            match draft.apply_field(field, value) {
+                Ok(()) => self.show_byok_edit_view(),
+                Err(message) => {
+                    self.chat_widget.add_error_message(message);
+                    self.show_byok_edit_view();
+                }
+            }
+        } else {
+            self.open_byok_manager();
+        }
+    }
+
+    fn cycle_byok_provider_kind(&mut self) {
+        if let Some(draft) = self.byok_draft.as_mut() {
+            draft.cycle_provider_kind();
             self.show_byok_edit_view();
         } else {
             self.open_byok_manager();
         }
+    }
+
+    fn toggle_byok_think(&mut self) {
+        if let Some(draft) = self.byok_draft.as_mut() {
+            draft.toggle_think();
+            self.show_byok_edit_view();
+        } else {
+            self.open_byok_manager();
+        }
+    }
+
+    fn toggle_byok_postprocess(&mut self) {
+        if let Some(draft) = self.byok_draft.as_mut() {
+            draft.toggle_postprocess();
+            self.show_byok_edit_view();
+        } else {
+            self.open_byok_manager();
+        }
+    }
+
+    fn refresh_byok_provider_models(&mut self, provider_id: &str) {
+        let Some(provider_snapshot) = self.settings.custom_provider(provider_id).cloned() else {
+            self.chat_widget
+                .add_error_message(format!("Provider `{provider_id}` not found"));
+            self.open_byok_manager();
+            return;
+        };
+
+        let api_key_result = self.auth_manager.custom_provider_api_key(provider_id);
+        let api_key_opt = match api_key_result {
+            Ok(value) => value,
+            Err(err) => {
+                warn!(provider_id = provider_id, %err, "failed to load provider API key");
+                self.chat_widget.add_error_message(format!(
+                    "Failed to read stored API key for `{provider_id}`: {err}"
+                ));
+                return;
+            }
+        };
+
+        if provider_snapshot.provider_kind != ProviderKind::Ollama && api_key_opt.is_none() {
+            self.chat_widget.add_error_message(format!(
+                "Add an API key before refreshing models for `{provider_id}`."
+            ));
+            return;
+        }
+
+        self.chat_widget
+            .add_info_message(format!("Refreshing models for `{provider_id}`…"), None);
+
+        let tx = self.app_event_tx.clone();
+        let provider_id_clone = provider_id.to_string();
+        let api_key_clone = api_key_opt;
+        tokio::spawn(async move {
+            let result = fetch_custom_provider_models(
+                &provider_id_clone,
+                &provider_snapshot,
+                api_key_clone.as_deref(),
+            )
+            .await
+            .map_err(|err| err.to_string());
+            tx.send(AppEvent::CustomProviderModelsFetched {
+                provider_id: provider_id_clone,
+                result,
+            });
+        });
+    }
+
+    fn show_byok_provider_models(&mut self, provider_id: &str) {
+        let Some(provider) = self.settings.custom_provider(provider_id) else {
+            self.chat_widget
+                .add_error_message(format!("Provider `{provider_id}` not found"));
+            self.open_byok_manager();
+            return;
+        };
+
+        let mut items: Vec<SelectionItem> = Vec::new();
+
+        if let Some(default_model) = provider.default_model.as_deref() {
+            items.push(SelectionItem {
+                name: format!("Default model: {default_model}"),
+                description: Some("Used when no cached models are available.".to_string()),
+                actions: Vec::new(),
+                dismiss_on_select: false,
+                ..Default::default()
+            });
+        }
+
+        if let Some(models) = provider.cached_models.as_ref() {
+            if models.is_empty() {
+                items.push(SelectionItem {
+                    name: "No cached models yet".to_string(),
+                    description: Some("Refresh to discover models for this provider.".to_string()),
+                    actions: Vec::new(),
+                    dismiss_on_select: false,
+                    ..Default::default()
+                });
+            } else {
+                for model in models {
+                    let is_current =
+                        self.config.model == *model && self.config.model_provider_id == provider_id;
+                    items.push(SelectionItem {
+                        name: model.clone(),
+                        description: None,
+                        is_current,
+                        actions: Vec::new(),
+                        dismiss_on_select: false,
+                        ..Default::default()
+                    });
+                }
+            }
+        } else {
+            items.push(SelectionItem {
+                name: "No cached models yet".to_string(),
+                description: Some("Refresh to discover models for this provider.".to_string()),
+                actions: Vec::new(),
+                dismiss_on_select: false,
+                ..Default::default()
+            });
+        }
+
+        let refresh_id = provider_id.to_string();
+        items.push(SelectionItem {
+            name: "Refresh models".to_string(),
+            description: Some("Test connectivity and update the cached list.".to_string()),
+            actions: vec![Box::new(move |tx: &AppEventSender| {
+                tx.send(AppEvent::RefreshByokProviderModels {
+                    provider_id: refresh_id.clone(),
+                });
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        let title = format!(
+            "Models — {}",
+            if provider.name.trim().is_empty() {
+                provider_id.to_string()
+            } else {
+                provider.name.clone()
+            }
+        );
+
+        let mut subtitle_parts = Vec::new();
+        if let Some(url) = provider.base_url.as_deref() {
+            subtitle_parts.push(url.to_string());
+        }
+        if let Some(refreshed) = provider.last_model_refresh.as_deref() {
+            subtitle_parts.push(format!("Last refresh: {refreshed}"));
+        } else {
+            subtitle_parts.push("Never refreshed".to_string());
+        }
+
+        let params = SelectionViewParams {
+            title: Some(title),
+            subtitle: Some(subtitle_parts.join(" • ")),
+            footer_hint: Some("Esc to close.".into()),
+            items,
+            ..Default::default()
+        };
+
+        self.chat_widget.show_selection_view(params);
     }
 
     fn submit_byok_form(
@@ -1684,7 +2136,9 @@ impl App {
                 "Provider ID must contain lowercase letters, digits, hyphen, or underscore"
             ));
         }
-        if is_reserved_provider_id(provider_id_raw) {
+        if is_reserved_provider_id(provider_id_raw)
+            && !matches!(original_id.as_deref(), Some(existing) if existing == provider_id_raw)
+        {
             return Err(eyre!("Provider ID `{provider_id_raw}` is reserved"));
         }
         let provider_id = provider_id_raw.to_string();
@@ -1711,7 +2165,7 @@ impl App {
             ));
         }
 
-        let (base_url, wire_api) = normalize_custom_provider_base_url(form.base_url)?;
+        let (mut base_url, mut wire_api) = normalize_custom_provider_base_url(form.base_url)?;
 
         let default_model = form.default_model.and_then(|value| {
             let trimmed = value.trim().to_string();
@@ -1730,6 +2184,13 @@ impl App {
             CustomProvider::default()
         };
 
+        if form.provider_kind == ProviderKind::Ollama {
+            if base_url.is_none() {
+                base_url = Some(DEFAULT_OLLAMA_ENDPOINT.to_string());
+            }
+            wire_api = WireApi::Chat;
+        }
+
         provider.name = name.to_string();
         provider.base_url = base_url;
         provider.wire_api = wire_api;
@@ -1746,6 +2207,30 @@ impl App {
                 }
             }
         };
+        provider.provider_kind = form.provider_kind;
+        provider.reasoning_controls.think_enabled =
+            form.think_enabled && form.provider_kind == ProviderKind::Ollama;
+        provider.reasoning_controls.postprocess_reasoning =
+            if form.provider_kind == ProviderKind::Ollama {
+                form.postprocess_reasoning
+            } else {
+                true
+            };
+        provider.reasoning_controls.anthropic_budget_tokens =
+            if form.provider_kind == ProviderKind::AnthropicClaude {
+                form.anthropic_budget_tokens
+            } else {
+                None
+            };
+        provider.reasoning_controls.anthropic_budget_weight =
+            if form.provider_kind == ProviderKind::AnthropicClaude {
+                form.anthropic_budget_weight
+            } else {
+                None
+            };
+        if form.provider_kind == ProviderKind::Ollama {
+            provider.wire_api = WireApi::Chat;
+        }
         if provider.added_at.is_none() {
             provider.added_at = Some(Utc::now().to_rfc3339());
         }
@@ -1775,6 +2260,8 @@ impl App {
         codex_agentic_core::merge_custom_providers_into_config(&mut self.config, &self.settings);
         self.chat_widget
             .sync_model_providers(&self.config.model_providers);
+        sanitize_reasoning_overrides(&mut self.config);
+        sanitize_tool_overrides(&mut self.config);
 
         if let Some(original) = original_id.as_ref()
             && original != &provider_id
@@ -1807,24 +2294,6 @@ impl App {
                 self.auth_manager
                     .delete_custom_provider_api_key(&provider_id)?;
             }
-        }
-
-        let provider_snapshot = self.settings.custom_provider(&provider_id).cloned();
-        if let Some(provider_snapshot) = provider_snapshot
-            && let Ok(Some(api_key)) = self.auth_manager.custom_provider_api_key(&provider_id)
-        {
-            let tx = self.app_event_tx.clone();
-            let provider_id_clone = provider_id.clone();
-            tokio::spawn(async move {
-                let result =
-                    fetch_custom_provider_models(&provider_id_clone, &provider_snapshot, &api_key)
-                        .await
-                        .map_err(|err| err.to_string());
-                tx.send(AppEvent::CustomProviderModelsFetched {
-                    provider_id: provider_id_clone,
-                    result,
-                });
-            });
         }
 
         self.chat_widget

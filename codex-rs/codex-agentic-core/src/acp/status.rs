@@ -359,10 +359,10 @@ fn describe_window(minutes: u64) -> String {
     if minutes < MINUTES_PER_HOUR {
         format!("{minutes}m")
     } else if minutes <= MINUTES_PER_DAY {
-        let hours = (minutes + MINUTES_PER_HOUR - 1) / MINUTES_PER_HOUR;
+        let hours = minutes.div_ceil(MINUTES_PER_HOUR);
         format!("{hours}h")
     } else if minutes <= MINUTES_PER_WEEK {
-        let days = (minutes + MINUTES_PER_DAY - 1) / MINUTES_PER_DAY;
+        let days = minutes.div_ceil(MINUTES_PER_DAY);
         format!("{days}d")
     } else if minutes <= MINUTES_PER_MONTH {
         "Weekly".to_string()

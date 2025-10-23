@@ -5,15 +5,21 @@ expression: popup
   Select Model and Effort
   Switch the model for this and future Codex CLI sessions
 
-  1. gpt-5 [OpenAI]                     Broad world knowledge with strong
-                                        general reasoning.
-› 2. gpt-5-codex [OpenAI] (current)     Optimized for coding tasks with many
-                                        tools.
-  3. deepseek-r1:32b [Ollama]           Local Ollama model
-  4. deepseek-r1:latest [Ollama]        Local Ollama model
-  5. glm4:latest [Ollama]               Local Ollama model
-  6. gpt-oss:20b [Ollama]               Local Ollama model
-  7. llama3.2:latest [Ollama]           Local Ollama model
-  8. mxbai-embed-large:latest [Ollama]  Local Ollama model
+  4. gpt-oss:20b [Ollama (localhost)]               Custom provider `Ollama
+                                                    (localhost)`
+  5. llama3.2:latest [Ollama (localhost)]           Custom provider `Ollama
+                                                    (localhost)`
+  6. mxbai-embed-large:latest [Ollama (localhost)]  Custom provider `Ollama
+                                                    (localhost)`
+  7. qwen2.5vl:latest [Ollama (localhost)]          Custom provider `Ollama
+                                                    (localhost)`
+  8. qwen3:latest [Ollama (localhost)]              Custom provider `Ollama
+                                                    (localhost)`
+  9. qwq:latest [Ollama (localhost)]                Custom provider `Ollama
+                                                    (localhost)`
+  10. gpt-5 [OpenAI]                                Broad world knowledge with
+                                                    strong general reasoning.
+› 11. gpt-5-codex [OpenAI] (current)                Optimized for coding tasks
+                                                    with many tools.
 
   Press enter to select reasoning effort, or esc to dismiss.

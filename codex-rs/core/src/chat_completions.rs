@@ -6,6 +6,7 @@ use crate::ModelProviderInfo;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
+use crate::config_types::ProviderKind;
 use crate::error::CodexErr;
 use crate::error::ConnectionFailedError;
 use crate::error::ResponseStreamFailed;
@@ -26,6 +27,8 @@ use futures::Stream;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use reqwest::StatusCode;
+use serde_json::Map as JsonMap;
+use serde_json::Value as JsonValue;
 use serde_json::json;
 use std::pin::Pin;
 use std::task::Context;
@@ -45,6 +48,127 @@ fn provider_supports_streaming(provider: &ModelProviderInfo) -> bool {
                 || lower.contains("open.bigmodel.cn/api/coding/paas/"))
         })
         .unwrap_or(true)
+}
+
+#[derive(Default)]
+struct ThinkParser {
+    buffer: String,
+}
+
+#[derive(Default)]
+struct ThinkExtraction {
+    visible: String,
+    reasoning: Vec<String>,
+}
+
+impl ThinkParser {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn push(&mut self, fragment: &str) -> ThinkExtraction {
+        self.buffer.push_str(fragment);
+        self.extract(false)
+    }
+
+    fn flush(&mut self) -> ThinkExtraction {
+        self.extract(true)
+    }
+
+    fn strip_all(text: &str) -> ThinkExtraction {
+        let mut parser = ThinkParser::new();
+        let mut total = parser.push(text);
+        let remainder = parser.flush();
+        total.visible.push_str(&remainder.visible);
+        total.reasoning.extend(remainder.reasoning);
+        total
+    }
+
+    fn extract(&mut self, finalize: bool) -> ThinkExtraction {
+        let data = std::mem::take(&mut self.buffer);
+        let mut visible = String::new();
+        let mut reasoning = Vec::new();
+        let mut idx = 0;
+
+        while let Some(start_rel) = data[idx..].find("<think>") {
+            let start = idx + start_rel;
+            visible.push_str(&data[idx..start]);
+            let think_start = start + "<think>".len();
+            if let Some(end_rel) = data[think_start..].find("</think>") {
+                let end = think_start + end_rel;
+                reasoning.push(data[think_start..end].to_string());
+                idx = end + "</think>".len();
+            } else {
+                if finalize {
+                    visible.push_str(&data[start..]);
+                    idx = data.len();
+                } else {
+                    self.buffer = data[start..].to_string();
+                    return ThinkExtraction { visible, reasoning };
+                }
+                break;
+            }
+        }
+
+        let remainder = &data[idx..];
+        if finalize {
+            visible.push_str(remainder);
+            self.buffer.clear();
+        } else {
+            let keep = longest_suffix_prefix(remainder, "<think>");
+            let safe_len = remainder.len() - keep;
+            visible.push_str(&remainder[..safe_len]);
+            self.buffer = remainder[safe_len..].to_string();
+        }
+
+        ThinkExtraction { visible, reasoning }
+    }
+}
+
+fn longest_suffix_prefix(haystack: &str, needle: &str) -> usize {
+    let max = needle.len().min(haystack.len());
+    for len in (1..=max).rev() {
+        if haystack.ends_with(&needle[..len]) {
+            return len;
+        }
+    }
+    0
+}
+
+fn append_reasoning(reasoning_text: &mut String, segment: &str) {
+    if segment.is_empty() {
+        return;
+    }
+    if !reasoning_text.is_empty() {
+        reasoning_text.push('\n');
+    }
+    reasoning_text.push_str(segment);
+}
+
+fn apply_provider_reasoning_overrides(payload: &mut JsonValue, provider: &ModelProviderInfo) {
+    if let Some(obj) = payload.as_object_mut() {
+        match provider.provider_kind {
+            ProviderKind::Ollama => {
+                obj.insert(
+                    "think".to_string(),
+                    json!(provider.reasoning_controls.think_enabled),
+                );
+            }
+            ProviderKind::AnthropicClaude => {
+                let mut thinking = JsonMap::new();
+                if let Some(tokens) = provider.reasoning_controls.anthropic_budget_tokens {
+                    thinking.insert("budget_tokens".to_string(), json!(tokens));
+                }
+                if let Some(weight) = provider.reasoning_controls.anthropic_budget_weight {
+                    thinking.insert("budget_weight".to_string(), json!(weight));
+                }
+                if !thinking.is_empty() {
+                    obj.insert("thinking".to_string(), JsonValue::Object(thinking));
+                }
+            }
+            ProviderKind::OpenAiResponses => {}
+        }
+    }
 }
 
 /// Implementation for the classic Chat Completions API.
@@ -296,6 +420,9 @@ pub(crate) async fn stream_chat_completions(
         }
     }
 
+    let strip_think = provider.provider_kind == ProviderKind::Ollama
+        && provider.reasoning_controls.postprocess_reasoning;
+
     if !supports_streaming {
         return chat_completions_non_streaming(
             prompt,
@@ -305,18 +432,20 @@ pub(crate) async fn stream_chat_completions(
             provider_id,
             auth_manager,
             otel_event_manager,
+            strip_think,
             messages,
         )
         .await;
     }
 
     let tools_json = create_tools_json_for_chat_completions_api(&prompt.tools)?;
-    let payload = json!({
+    let mut payload = json!({
         "model": model_family.slug,
         "messages": messages,
         "stream": true,
         "tools": tools_json,
     });
+    apply_provider_reasoning_overrides(&mut payload, provider);
 
     let mut attempt = 0;
     let max_retries = provider.request_max_retries();
@@ -358,6 +487,7 @@ pub(crate) async fn stream_chat_completions(
                     tx_event,
                     provider.stream_idle_timeout(),
                     otel_event_manager.clone(),
+                    strip_think,
                 ));
                 return Ok(ResponseStream { rx_event });
             }
@@ -412,15 +542,17 @@ async fn chat_completions_non_streaming(
     provider_id: &str,
     auth_manager: &Option<Arc<AuthManager>>,
     otel_event_manager: &OtelEventManager,
+    strip_think: bool,
     messages: Vec<serde_json::Value>,
 ) -> Result<ResponseStream> {
     let tools_json = create_tools_json_for_chat_completions_api(&prompt.tools)?;
-    let payload = json!({
+    let mut payload = json!({
         "model": model_family.slug,
         "messages": messages,
         "stream": false,
         "tools": tools_json,
     });
+    apply_provider_reasoning_overrides(&mut payload, provider);
 
     let mut attempt = 0;
     let max_retries = provider.request_max_retries();
@@ -475,7 +607,7 @@ async fn chat_completions_non_streaming(
                         })
                     })?;
 
-                let response_items = parse_non_streaming_response_items(&choice);
+                let response_items = parse_non_streaming_response_items(&choice, strip_think);
                 let token_usage = body.get("usage").and_then(parse_token_usage);
 
                 let (tx, rx) = mpsc::channel::<Result<ResponseEvent>>(4);
@@ -533,7 +665,10 @@ async fn chat_completions_non_streaming(
     }
 }
 
-fn parse_non_streaming_response_items(choice: &serde_json::Value) -> Vec<ResponseItem> {
+fn parse_non_streaming_response_items(
+    choice: &serde_json::Value,
+    strip_think: bool,
+) -> Vec<ResponseItem> {
     let mut items = Vec::new();
 
     let message_map = choice
@@ -586,17 +721,39 @@ fn parse_non_streaming_response_items(choice: &serde_json::Value) -> Vec<Respons
     }
 
     if let Some(content_value) = message_map.get("content")
-        && let Some(text) = collect_text_field(content_value)
+        && let Some(mut text) = collect_text_field(content_value)
     {
-        items.push(ResponseItem::Message {
-            id: None,
-            role: message_map
-                .get("role")
-                .and_then(|r| r.as_str())
-                .unwrap_or("assistant")
-                .to_string(),
-            content: vec![ContentItem::OutputText { text }],
-        });
+        let mut think_reasoning: Vec<String> = Vec::new();
+        if strip_think {
+            let mut extraction = ThinkParser::strip_all(&text);
+            text = extraction.visible;
+            think_reasoning.append(&mut extraction.reasoning);
+        }
+
+        for segment in think_reasoning {
+            if !segment.trim().is_empty() {
+                items.push(ResponseItem::Reasoning {
+                    id: String::new(),
+                    summary: Vec::new(),
+                    content: Some(vec![ReasoningItemContent::ReasoningText {
+                        text: segment.clone(),
+                    }]),
+                    encrypted_content: None,
+                });
+            }
+        }
+
+        if !text.is_empty() {
+            items.push(ResponseItem::Message {
+                id: None,
+                role: message_map
+                    .get("role")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("assistant")
+                    .to_string(),
+                content: vec![ContentItem::OutputText { text }],
+            });
+        }
     }
 
     items
@@ -667,6 +824,58 @@ fn parse_token_usage(usage: &serde_json::Value) -> Option<TokenUsage> {
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn think_parser_strips_single_segment() {
+        let mut parser = ThinkParser::new();
+        let first = parser.push("Hello <think>plan</think> world");
+        assert_eq!(first.visible, "Hello  world");
+        assert_eq!(first.reasoning, vec!["plan".to_string()]);
+
+        let flush = parser.flush();
+        assert!(flush.visible.is_empty());
+        assert!(flush.reasoning.is_empty());
+    }
+
+    #[test]
+    fn think_parser_handles_chunk_boundaries() {
+        let mut parser = ThinkParser::new();
+
+        let chunk1 = parser.push("Hel");
+        assert_eq!(chunk1.visible, "Hel");
+        assert!(chunk1.reasoning.is_empty());
+
+        let chunk2 = parser.push("lo <thi");
+        assert_eq!(chunk2.visible, "lo ");
+        assert!(chunk2.reasoning.is_empty());
+
+        let chunk3 = parser.push("nk>foo</think> world");
+        assert_eq!(chunk3.visible, " world");
+        assert_eq!(chunk3.reasoning, vec!["foo".to_string()]);
+
+        let flush = parser.flush();
+        assert!(flush.visible.is_empty());
+        assert!(flush.reasoning.is_empty());
+    }
+
+    #[test]
+    fn think_parser_multiple_segments() {
+        let extraction = ThinkParser::strip_all("A<think>x</think>B<think>y</think>");
+        assert_eq!(extraction.visible, "AB");
+        assert_eq!(extraction.reasoning, vec!["x".to_string(), "y".to_string()]);
+    }
+
+    #[test]
+    fn think_parser_leaves_incomplete_tag_visible() {
+        let extraction = ThinkParser::strip_all("<think>partial");
+        assert_eq!(extraction.visible, "<think>partial");
+        assert!(extraction.reasoning.is_empty());
+    }
+}
+
 /// Lightweight SSE processor for the Chat Completions streaming format. The
 /// output is mapped onto Codex's internal [`ResponseEvent`] so that the rest
 /// of the pipeline can stay agnostic of the underlying wire format.
@@ -675,6 +884,7 @@ async fn process_chat_sse<S>(
     tx_event: mpsc::Sender<Result<ResponseEvent>>,
     idle_timeout: Duration,
     otel_event_manager: OtelEventManager,
+    strip_think_tags: bool,
 ) where
     S: Stream<Item = Result<Bytes>> + Unpin,
 {
@@ -696,6 +906,7 @@ async fn process_chat_sse<S>(
     let mut fn_call_state = FunctionCallState::default();
     let mut assistant_text = String::new();
     let mut reasoning_text = String::new();
+    let mut think_parser = strip_think_tags.then(ThinkParser::new);
 
     loop {
         let start = std::time::Instant::now();
@@ -734,6 +945,23 @@ async fn process_chat_sse<S>(
 
         // OpenAI Chat streaming sends a literal string "[DONE]" when finished.
         if sse.data.trim() == "[DONE]" {
+            if let Some(parser) = think_parser.as_mut() {
+                let extracted = parser.flush();
+                if !extracted.visible.is_empty() {
+                    assistant_text.push_str(&extracted.visible);
+                    let _ = tx_event
+                        .send(Ok(ResponseEvent::OutputTextDelta(
+                            extracted.visible.clone(),
+                        )))
+                        .await;
+                }
+                for segment in extracted.reasoning {
+                    append_reasoning(&mut reasoning_text, segment.trim());
+                    let _ = tx_event
+                        .send(Ok(ResponseEvent::ReasoningContentDelta(segment)))
+                        .await;
+                }
+            }
             // Emit any finalized items before closing so downstream consumers receive
             // terminal events for both assistant content and raw reasoning.
             if !assistant_text.is_empty() {
@@ -785,10 +1013,28 @@ async fn process_chat_sse<S>(
                 .and_then(|c| c.as_str())
                 && !content.is_empty()
             {
-                assistant_text.push_str(content);
-                let _ = tx_event
-                    .send(Ok(ResponseEvent::OutputTextDelta(content.to_string())))
-                    .await;
+                if let Some(parser) = think_parser.as_mut() {
+                    let extracted = parser.push(content);
+                    if !extracted.visible.is_empty() {
+                        assistant_text.push_str(&extracted.visible);
+                        let _ = tx_event
+                            .send(Ok(ResponseEvent::OutputTextDelta(
+                                extracted.visible.clone(),
+                            )))
+                            .await;
+                    }
+                    for segment in extracted.reasoning {
+                        append_reasoning(&mut reasoning_text, segment.trim());
+                        let _ = tx_event
+                            .send(Ok(ResponseEvent::ReasoningContentDelta(segment)))
+                            .await;
+                    }
+                } else {
+                    assistant_text.push_str(content);
+                    let _ = tx_event
+                        .send(Ok(ResponseEvent::OutputTextDelta(content.to_string())))
+                        .await;
+                }
             }
 
             // Forward any reasoning/thinking deltas if present.
@@ -818,7 +1064,7 @@ async fn process_chat_sse<S>(
 
                 if let Some(reasoning) = maybe_text {
                     // Accumulate so we can emit a terminal Reasoning item at the end.
-                    reasoning_text.push_str(&reasoning);
+                    append_reasoning(&mut reasoning_text, reasoning.trim());
                     let _ = tx_event
                         .send(Ok(ResponseEvent::ReasoningContentDelta(reasoning)))
                         .await;
@@ -831,7 +1077,7 @@ async fn process_chat_sse<S>(
                 // Accept either a plain string or an object with { text | content }
                 if let Some(s) = message_reasoning.as_str() {
                     if !s.is_empty() {
-                        reasoning_text.push_str(s);
+                        append_reasoning(&mut reasoning_text, s.trim());
                         let _ = tx_event
                             .send(Ok(ResponseEvent::ReasoningContentDelta(s.to_string())))
                             .await;
@@ -843,7 +1089,7 @@ async fn process_chat_sse<S>(
                         .or_else(|| obj.get("content").and_then(|v| v.as_str()))
                     && !s.is_empty()
                 {
-                    reasoning_text.push_str(s);
+                    append_reasoning(&mut reasoning_text, s.trim());
                     let _ = tx_event
                         .send(Ok(ResponseEvent::ReasoningContentDelta(s.to_string())))
                         .await;
@@ -880,6 +1126,23 @@ async fn process_chat_sse<S>(
 
             // Emit end-of-turn when finish_reason signals completion.
             if let Some(finish_reason) = choice.get("finish_reason").and_then(|v| v.as_str()) {
+                if let Some(parser) = think_parser.as_mut() {
+                    let extracted = parser.flush();
+                    if !extracted.visible.is_empty() {
+                        assistant_text.push_str(&extracted.visible);
+                        let _ = tx_event
+                            .send(Ok(ResponseEvent::OutputTextDelta(
+                                extracted.visible.clone(),
+                            )))
+                            .await;
+                    }
+                    for segment in extracted.reasoning {
+                        append_reasoning(&mut reasoning_text, segment.trim());
+                        let _ = tx_event
+                            .send(Ok(ResponseEvent::ReasoningContentDelta(segment)))
+                            .await;
+                    }
+                }
                 match finish_reason {
                     "tool_calls" if fn_call_state.active => {
                         // First, flush the terminal raw reasoning so UIs can finalize

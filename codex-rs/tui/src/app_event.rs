@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use codex_agentic_core::index::events::IndexEvent;
 use codex_agentic_core::index::query::QueryHit;
 use codex_common::model_presets::ModelPreset;
+use codex_core::config_types::ProviderKind;
 use codex_core::protocol::ConversationPathResponseEvent;
 use codex_core::protocol::Event;
 use codex_file_search::FileMatch;
@@ -23,6 +24,11 @@ pub(crate) struct CustomProviderForm {
     pub base_url: Option<String>,
     pub default_model: Option<String>,
     pub extra_headers: Option<String>,
+    pub provider_kind: ProviderKind,
+    pub think_enabled: bool,
+    pub postprocess_reasoning: bool,
+    pub anthropic_budget_tokens: Option<u32>,
+    pub anthropic_budget_weight: Option<f32>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -195,6 +201,25 @@ pub(crate) enum AppEvent {
         field: ByokDraftField,
         value: String,
     },
+
+    /// Cycle the provider kind for the BYOK draft.
+    CycleByokProviderKind,
+
+    /// Toggle Ollama thinking flag for the BYOK draft.
+    ToggleByokThink,
+
+    /// Toggle postprocess reasoning flag for the BYOK draft.
+    ToggleByokPostprocess,
+
+    /// Refresh models by testing connectivity for a provider.
+    RefreshByokProviderModels {
+        provider_id: String,
+    },
+
+    /// Show cached models for a provider.
+    ShowByokProviderModels {
+        provider_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -205,4 +230,6 @@ pub(crate) enum ByokDraftField {
     DefaultModel,
     ApiKey,
     ExtraHeaders,
+    AnthropicBudgetTokens,
+    AnthropicBudgetWeight,
 }

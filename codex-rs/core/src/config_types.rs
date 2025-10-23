@@ -4,6 +4,8 @@
 // definitions that do not contain business logic.
 
 use serde::Deserializer;
+use serde_json::Value as JsonValue;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -14,6 +16,60 @@ use serde::Serialize;
 use serde::de::Error as SerdeError;
 
 pub const DEFAULT_OTEL_ENVIRONMENT: &str = "dev";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderKind {
+    OpenAiResponses,
+    Ollama,
+    AnthropicClaude,
+}
+
+impl Default for ProviderKind {
+    fn default() -> Self {
+        Self::OpenAiResponses
+    }
+}
+
+const fn default_postprocess_reasoning() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderReasoningControls {
+    #[serde(default)]
+    pub think_enabled: bool,
+    #[serde(default = "default_postprocess_reasoning")]
+    pub postprocess_reasoning: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_budget_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_budget_weight: Option<f32>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, JsonValue>,
+}
+
+impl Default for ProviderReasoningControls {
+    fn default() -> Self {
+        Self {
+            think_enabled: false,
+            postprocess_reasoning: true,
+            anthropic_budget_tokens: None,
+            anthropic_budget_weight: None,
+            extra: BTreeMap::new(),
+        }
+    }
+}
+
+impl ProviderReasoningControls {
+    pub fn is_default(&self) -> bool {
+        !self.think_enabled
+            && self.postprocess_reasoning
+            && self.anthropic_budget_tokens.is_none()
+            && self.anthropic_budget_weight.is_none()
+            && self.extra.is_empty()
+    }
+}
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct McpServerConfig {

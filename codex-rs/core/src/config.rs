@@ -13,6 +13,7 @@ use crate::config_types::Notifications;
 use crate::config_types::OtelConfig;
 use crate::config_types::OtelConfigToml;
 use crate::config_types::OtelExporterKind;
+use crate::config_types::ProviderKind;
 use crate::config_types::ReasoningSummaryFormat;
 use crate::config_types::SandboxWorkspaceWrite;
 use crate::config_types::ShellEnvironmentPolicy;
@@ -1450,6 +1451,10 @@ impl Config {
             return false;
         }
 
+        if matches!(self.model_provider.provider_kind, ProviderKind::Ollama) {
+            return false;
+        }
+
         if self.model_provider_id == BUILT_IN_OSS_MODEL_PROVIDER_ID {
             return oss_model_supports_tools(self.model.as_str());
         }
@@ -2755,6 +2760,8 @@ model_verbosity = "high"
             stream_max_retries: Some(10),
             stream_idle_timeout_ms: Some(300_000),
             requires_openai_auth: false,
+            provider_kind: crate::config_types::ProviderKind::OpenAiResponses,
+            reasoning_controls: crate::config_types::ProviderReasoningControls::default(),
         };
         let model_provider_map = {
             let mut model_provider_map = built_in_model_providers();

@@ -1,11 +1,16 @@
+use crate::provider::DEFAULT_OLLAMA_ENDPOINT;
 use anyhow::Context;
 use anyhow::Result;
 use codex_core::WireApi;
+use codex_core::config_types::ProviderKind;
+use codex_core::config_types::ProviderReasoningControls;
+use codex_ollama::DEFAULT_OSS_MODEL;
 use once_cell::sync::Lazy;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
+use std::collections::btree_map::Entry;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -146,6 +151,10 @@ pub struct CustomProvider {
     pub extra_headers: Option<BTreeMap<String, String>>,
     #[serde(default)]
     pub plan_tool_enabled: bool,
+    #[serde(default)]
+    pub provider_kind: ProviderKind,
+    #[serde(default, skip_serializing_if = "ProviderReasoningControls::is_default")]
+    pub reasoning_controls: ProviderReasoningControls,
 }
 
 impl Default for CustomProvider {
@@ -160,6 +169,8 @@ impl Default for CustomProvider {
             last_model_refresh: None,
             extra_headers: None,
             plan_tool_enabled: false,
+            provider_kind: ProviderKind::default(),
+            reasoning_controls: ProviderReasoningControls::default(),
         }
     }
 }
@@ -171,6 +182,18 @@ impl CustomProvider {
 
     pub fn plan_tool_enabled(&self) -> bool {
         self.plan_tool_enabled
+    }
+
+    pub fn provider_kind(&self) -> ProviderKind {
+        self.provider_kind
+    }
+
+    pub fn reasoning_controls(&self) -> &ProviderReasoningControls {
+        &self.reasoning_controls
+    }
+
+    pub fn reasoning_controls_mut(&mut self) -> &mut ProviderReasoningControls {
+        &mut self.reasoning_controls
     }
 }
 
@@ -363,20 +386,125 @@ fn score_candidate(path: &Path, cwd: Option<&Path>, exe_dir: Option<&Path>) -> i
     score
 }
 
-pub fn load() -> Settings {
-    let path = resolve_settings_path();
-    if path.exists() {
-        load_from_path(&path)
-    } else {
-        Settings::default()
+fn run_migrations(settings: &mut Settings) {
+    migrate_custom_provider_defaults(settings);
+    migrate_legacy_oss_provider(settings);
+}
+
+fn migrate_custom_provider_defaults(settings: &mut Settings) {
+    let Some(providers) = settings.providers.as_mut() else {
+        return;
+    };
+
+    for (provider_id, provider) in providers.custom.iter_mut() {
+        if provider.provider_kind != ProviderKind::OpenAiResponses {
+            continue;
+        }
+
+        let id_lower = provider_id.to_ascii_lowercase();
+        let name_lower = provider.name.to_ascii_lowercase();
+        let base_url = provider
+            .base_url
+            .as_ref()
+            .map(|url| url.to_ascii_lowercase());
+
+        let looks_like_ollama = id_lower.contains("ollama")
+            || name_lower.contains("ollama")
+            || base_url
+                .as_ref()
+                .map(|url| url.contains("ollama") || url.contains(":11434"))
+                .unwrap_or(false);
+
+        if looks_like_ollama {
+            provider.provider_kind = ProviderKind::Ollama;
+            provider.reasoning_controls = ProviderReasoningControls::default();
+            if provider.wire_api != WireApi::Chat {
+                provider.wire_api = WireApi::Chat;
+            }
+            continue;
+        }
+
+        let looks_like_anthropic = id_lower.contains("anthropic")
+            || name_lower.contains("anthropic")
+            || base_url
+                .as_ref()
+                .map(|url| url.contains("anthropic"))
+                .unwrap_or(false);
+
+        if looks_like_anthropic {
+            provider.provider_kind = ProviderKind::AnthropicClaude;
+        }
     }
 }
 
-pub fn load_from_path(path: &Path) -> Settings {
+fn migrate_legacy_oss_provider(settings: &mut Settings) {
+    let providers = settings.providers.get_or_insert_with(Providers::default);
+    let Some(legacy) = providers.oss.take() else {
+        return;
+    };
+
+    let endpoint = legacy
+        .endpoint
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_OLLAMA_ENDPOINT.to_string());
+
+    let template = CustomProvider {
+        name: "Ollama (localhost)".to_string(),
+        base_url: Some(endpoint.clone()),
+        wire_api: WireApi::Chat,
+        default_model: Some(DEFAULT_OSS_MODEL.to_string()),
+        provider_kind: ProviderKind::Ollama,
+        reasoning_controls: ProviderReasoningControls::default(),
+        ..CustomProvider::default()
+    };
+
+    match providers.custom.entry("ollama".to_string()) {
+        Entry::Vacant(entry) => {
+            entry.insert(template);
+        }
+        Entry::Occupied(mut entry) => {
+            let provider = entry.get_mut();
+            if provider.base_url.is_none() {
+                provider.base_url = Some(endpoint);
+            }
+            provider.provider_kind = ProviderKind::Ollama;
+            provider.wire_api = WireApi::Chat;
+            if provider.default_model.is_none() {
+                provider.default_model = Some(DEFAULT_OSS_MODEL.to_string());
+            }
+            if provider.reasoning_controls.postprocess_reasoning {
+                // already true; nothing to adjust
+            } else if !provider.reasoning_controls.think_enabled
+                && provider.reasoning_controls.extra.is_empty()
+            {
+                provider.reasoning_controls.postprocess_reasoning = true;
+            }
+        }
+    }
+}
+
+fn load_from_path_raw(path: &Path) -> Settings {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_default()
+}
+
+pub fn load() -> Settings {
+    let path = resolve_settings_path();
+    let mut settings = if path.exists() {
+        load_from_path_raw(&path)
+    } else {
+        Settings::default()
+    };
+    run_migrations(&mut settings);
+    settings
+}
+
+pub fn load_from_path(path: &Path) -> Settings {
+    let mut settings = load_from_path_raw(path);
+    run_migrations(&mut settings);
+    settings
 }
 
 pub fn save_to_path(path: &Path, settings: &Settings) -> Result<()> {
@@ -393,7 +521,8 @@ pub fn save_to_path(path: &Path, settings: &Settings) -> Result<()> {
     Ok(())
 }
 
-pub fn init_global(settings: Settings) -> Settings {
+pub fn init_global(mut settings: Settings) -> Settings {
+    run_migrations(&mut settings);
     if let Ok(mut guard) = SETTINGS.write() {
         *guard = settings.clone();
     }
@@ -414,6 +543,7 @@ pub fn persist_default_model_selection(model: &str, provider: Option<&str>) -> R
     if let Some(provider) = provider {
         model_settings.provider = Some(provider.to_string());
     }
+    run_migrations(&mut updated);
     let path = resolve_settings_path();
     save_to_path(&path, &updated)?;
     init_global(updated.clone());
@@ -423,13 +553,15 @@ pub fn persist_default_model_selection(model: &str, provider: Option<&str>) -> R
 pub fn persist_search_confidence_min(min: Option<f32>) -> Result<Settings> {
     let mut updated = global();
     updated.update_search_confidence_min(min);
+    run_migrations(&mut updated);
     let path = resolve_settings_path();
     save_to_path(&path, &updated)?;
     init_global(updated.clone());
     Ok(updated)
 }
 
-pub fn persist(settings: Settings) -> Result<Settings> {
+pub fn persist(mut settings: Settings) -> Result<Settings> {
+    run_migrations(&mut settings);
     let path = resolve_settings_path();
     save_to_path(&path, &settings)?;
     init_global(settings.clone());
@@ -463,6 +595,7 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn score_prefers_codex_settings_over_workspace_root() {
@@ -499,5 +632,32 @@ mod tests {
         assert!(
             (settings.search_confidence_min() - DEFAULT_SEARCH_CONFIDENCE_MIN).abs() < f32::EPSILON
         );
+    }
+
+    #[test]
+    fn migrate_legacy_oss_provider_creates_custom_entry() {
+        let mut settings = Settings {
+            providers: Some(Providers {
+                oss: Some(Oss {
+                    endpoint: Some("http://example.com:11434".to_string()),
+                }),
+                custom: BTreeMap::new(),
+            }),
+            ..Default::default()
+        };
+
+        super::run_migrations(&mut settings);
+
+        let providers = settings.providers.expect("providers present");
+        assert!(providers.oss.is_none());
+        let custom = providers
+            .custom
+            .get("ollama")
+            .expect("ollama custom provider created");
+        assert_eq!(custom.provider_kind, ProviderKind::Ollama);
+        assert_eq!(custom.base_url.as_deref(), Some("http://example.com:11434"));
+        assert_eq!(custom.wire_api, WireApi::Chat);
+        assert!(custom.reasoning_controls.postprocess_reasoning);
+        assert!(!custom.reasoning_controls.think_enabled);
     }
 }
