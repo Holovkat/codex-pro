@@ -4,13 +4,13 @@ use crate::app_event_sender::AppEventSender;
 use crate::test_backend::VT100Backend;
 use crate::tui::FrameRequester;
 use assert_matches::assert_matches;
+use codex_common::approval_presets::builtin_approval_presets;
 use codex_core::AuthManager;
 use codex_core::CodexAuth;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::ConfigToml;
 use codex_core::config::OPENAI_DEFAULT_MODEL;
-use codex_core::project_doc::DEFAULT_PROJECT_DOC_FILENAME;
 use codex_core::protocol::AgentMessageDeltaEvent;
 use codex_core::protocol::AgentMessageEvent;
 use codex_core::protocol::AgentReasoningDeltaEvent;
@@ -36,7 +36,6 @@ use codex_core::protocol::TaskCompleteEvent;
 use codex_core::protocol::TaskStartedEvent;
 use codex_core::protocol::ViewImageToolCallEvent;
 use codex_protocol::ConversationId;
-use codex_protocol::parse_command::ParsedCommand;
 use codex_protocol::plan_tool::PlanItemArg;
 use codex_protocol::plan_tool::StepStatus;
 use codex_protocol::plan_tool::UpdatePlanArgs;
@@ -241,8 +240,8 @@ async fn helpers_are_available_and_do_not_panic() {
         initial_prompt: None,
         initial_images: Vec::new(),
         enhanced_keys_supported: false,
-        feedback: codex_feedback::CodexFeedback::new(),
         auth_manager,
+        feedback: codex_feedback::CodexFeedback::new(),
     };
     let mut w = ChatWidget::new(init, conversation_manager);
     // Basic construction sanity.
@@ -286,6 +285,8 @@ fn make_chatwidget_manual() -> (
         interrupts: InterruptManager::new(),
         reasoning_buffer: String::new(),
         full_reasoning_buffer: String::new(),
+        current_status_header: String::from("Working"),
+        retry_status_header: None,
         conversation_id: None,
         frame_requester: FrameRequester::test_dummy(),
         show_welcome_banner: true,
@@ -401,7 +402,8 @@ fn exec_approval_emits_proposed_command_and_decision_history() {
         reason: Some(
             "this is a test reason such as one that would be produced by the model".into(),
         ),
-        parsed_cmd: Vec::new(),
+        risk: None,
+        parsed_cmd: vec![],
     };
     chat.handle_codex_event(Event {
         id: "sub-short".into(),
@@ -443,7 +445,8 @@ fn exec_approval_decision_truncates_multiline_and_long_commands() {
         reason: Some(
             "this is a test reason such as one that would be produced by the model".into(),
         ),
-        parsed_cmd: Vec::new(),
+        risk: None,
+        parsed_cmd: vec![],
     };
     chat.handle_codex_event(Event {
         id: "sub-multi".into(),
@@ -491,7 +494,8 @@ fn exec_approval_decision_truncates_multiline_and_long_commands() {
         command: vec!["bash".into(), "-lc".into(), long],
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         reason: None,
-        parsed_cmd: Vec::new(),
+        risk: None,
+        parsed_cmd: vec![],
     };
     chat.handle_codex_event(Event {
         id: "sub-long".into(),
@@ -820,7 +824,7 @@ fn slash_init_skips_when_project_doc_exists() {
     std::fs::write(&existing_path, "existing instructions").unwrap();
     chat.config.cwd = tempdir.path().to_path_buf();
 
-    chat.dispatch_command(SlashCommand::Init, None);
+    chat.dispatch_command(SlashCommand::Init);
 
     match op_rx.try_recv() {
         Err(TryRecvError::Empty) => {}
@@ -1130,6 +1134,31 @@ fn model_selection_popup_snapshot() {
 }
 
 #[test]
+fn approvals_selection_popup_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
+
+    chat.config.notices.hide_full_access_warning = None;
+    chat.open_approvals_popup();
+
+    let popup = render_bottom_popup(&chat, 80);
+    assert_snapshot!("approvals_selection_popup", popup);
+}
+
+#[test]
+fn full_access_confirmation_popup_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
+
+    let preset = builtin_approval_presets()
+        .into_iter()
+        .find(|preset| preset.id == "full-access")
+        .expect("full access preset");
+    chat.open_full_access_confirmation(preset);
+
+    let popup = render_bottom_popup(&chat, 80);
+    assert_snapshot!("full_access_confirmation_popup", popup);
+}
+
+#[test]
 fn model_reasoning_selection_popup_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
 
@@ -1153,11 +1182,11 @@ fn reasoning_popup_escape_returns_to_model_popup() {
     chat.config.model = "gpt-5".to_string();
     chat.open_model_popup();
 
-    let preset = builtin_model_presets(None)
+    let presets = builtin_model_presets(None)
         .into_iter()
         .find(|preset| preset.model == "gpt-5-codex")
         .expect("gpt-5-codex preset");
-    chat.open_reasoning_popup(preset);
+    chat.open_reasoning_popup(presets);
 
     let before_escape = render_bottom_popup(&chat, 80);
     assert!(before_escape.contains("Select Reasoning Level"));
@@ -1167,17 +1196,6 @@ fn reasoning_popup_escape_returns_to_model_popup() {
     let after_escape = render_bottom_popup(&chat, 80);
     assert!(after_escape.contains("Select Model and Effort"));
     assert!(!after_escape.contains("Select Reasoning Level"));
-}
-
-#[test]
-fn approvals_selection_popup_snapshot() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
-
-    chat.config.notices.hide_full_access_warning = None;
-    chat.open_approvals_popup();
-
-    let popup = render_bottom_popup(&chat, 80);
-    assert_snapshot!("approvals_selection_popup", popup);
 }
 
 #[test]
@@ -1218,7 +1236,7 @@ fn disabled_slash_command_while_task_running_snapshot() {
     chat.bottom_pane.set_task_running(true);
 
     // Dispatch a command that is unavailable while a task runs (e.g., /model)
-    chat.dispatch_command(SlashCommand::Model, None);
+    chat.dispatch_command(SlashCommand::Model);
 
     // Drain history and snapshot the rendered error line(s)
     let cells = drain_insert_history(&mut rx);
@@ -1406,7 +1424,8 @@ fn approval_modal_exec_snapshot() {
         reason: Some(
             "this is a test reason such as one that would be produced by the model".into(),
         ),
-        parsed_cmd: Vec::new(),
+        risk: None,
+        parsed_cmd: vec![],
     };
     chat.handle_codex_event(Event {
         id: "sub-approve".into(),
@@ -1450,7 +1469,8 @@ fn approval_modal_exec_without_reason_snapshot() {
         command: vec!["bash".into(), "-lc".into(), "echo hello world".into()],
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         reason: None,
-        parsed_cmd: Vec::new(),
+        risk: None,
+        parsed_cmd: vec![],
     };
     chat.handle_codex_event(Event {
         id: "sub-approve-noreason".into(),
@@ -1656,11 +1676,12 @@ fn status_widget_and_approval_modal_snapshot() {
     let ev = ExecApprovalRequestEvent {
         call_id: "call-approve-exec".into(),
         command: vec!["echo".into(), "hello world".into()],
-        cwd: std::path::PathBuf::from("/tmp"),
+        cwd: PathBuf::from("/tmp"),
         reason: Some(
             "this is a test reason such as one that would be produced by the model".into(),
         ),
-        parsed_cmd: Vec::new(),
+        risk: None,
+        parsed_cmd: vec![],
     };
     chat.handle_codex_event(Event {
         id: "sub-approve-exec".into(),
@@ -2164,19 +2185,7 @@ fn stream_error_updates_status_indicator() {
         .bottom_pane
         .status_widget()
         .expect("status indicator should be visible");
-    let width: u16 = 80;
-    let height = status.desired_height(width);
-    let area = ratatui::layout::Rect::new(0, 0, width, height);
-    let mut buf = ratatui::buffer::Buffer::empty(area);
-    status.render_ref(area, &mut buf);
-    let mut header_line = String::new();
-    for x in 0..area.width {
-        header_line.push_str(buf[(x, 0)].symbol());
-    }
-    assert!(
-        header_line.contains(msg),
-        "status header should contain reconnection message: {header_line:?}"
-    );
+    assert_eq!(status.header(), msg);
 }
 
 #[test]
@@ -2347,7 +2356,7 @@ fn chatwidget_exec_and_status_layout_vt100_snapshot() {
                 ParsedCommand::Read {
                     name: "diff_render.rs".into(),
                     cmd: "cat diff_render.rs".into(),
-                    path: PathBuf::from("diff_render.rs"),
+                    path: "diff_render.rs".into(),
                 },
             ],
         }),

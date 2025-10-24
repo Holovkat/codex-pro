@@ -178,7 +178,8 @@ async fn run_codex_tool_session_inner(
                         cwd,
                         call_id,
                         reason: _,
-                        ..
+                        risk,
+                        parsed_cmd,
                     }) => {
                         handle_exec_approval_request(
                             command,
@@ -189,6 +190,8 @@ async fn run_codex_tool_session_inner(
                             request_id_str.clone(),
                             event.id.clone(),
                             call_id,
+                            parsed_cmd,
+                            risk,
                         )
                         .await;
                         continue;
@@ -219,10 +222,6 @@ async fn run_codex_tool_session_inner(
                             event.id.clone(),
                         )
                         .await;
-                        continue;
-                    }
-                    EventMsg::MemoryPreview(_) => {
-                        // UI-only event; agentic tool runner ignores it.
                         continue;
                     }
                     EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }) => {
