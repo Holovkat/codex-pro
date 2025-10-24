@@ -6,8 +6,8 @@
 //!      key. These override or extend the defaults at runtime.
 
 use crate::CodexAuth;
-use crate::config_types::ProviderKind;
-use crate::config_types::ProviderReasoningControls;
+use crate::default_client::CodexHttpClient;
+use crate::default_client::CodexRequestBuilder;
 use codex_app_server_protocol::AuthMode;
 use serde::Deserialize;
 use serde::Serialize;
@@ -23,11 +23,6 @@ const DEFAULT_REQUEST_MAX_RETRIES: u64 = 4;
 const MAX_STREAM_MAX_RETRIES: u64 = 100;
 /// Hard cap for user-configured `request_max_retries`.
 const MAX_REQUEST_MAX_RETRIES: u64 = 100;
-
-#[allow(clippy::trivially_copy_pass_by_ref)]
-fn provider_kind_is_default(kind: &ProviderKind) -> bool {
-    matches!(kind, ProviderKind::OpenAiResponses)
-}
 
 /// Wire protocol that the provider speaks. Most third-party services only
 /// implement the classic OpenAI Chat Completions JSON schema, whereas OpenAI
@@ -98,19 +93,11 @@ pub struct ModelProviderInfo {
     /// and API key (if needed) comes from the "env_key" environment variable.
     #[serde(default)]
     pub requires_openai_auth: bool,
-
-    /// High-level provider kind used to drive BYOK UX and request handling.
-    #[serde(default, skip_serializing_if = "provider_kind_is_default")]
-    pub provider_kind: ProviderKind,
-
-    /// Provider-specific reasoning controls exposed via BYOK UX.
-    #[serde(default, skip_serializing_if = "ProviderReasoningControls::is_default")]
-    pub reasoning_controls: ProviderReasoningControls,
 }
 
 impl ModelProviderInfo {
     /// Construct a `POST` RequestBuilder for the given URL using the provided
-    /// reqwest Client applying:
+    /// [`CodexHttpClient`] applying:
     ///   • provider-specific headers (static + env based)
     ///   • Bearer auth header when an API key is available.
     ///   • Auth token for OAuth.
@@ -119,9 +106,9 @@ impl ModelProviderInfo {
     /// one produced by [`ModelProviderInfo::api_key`].
     pub async fn create_request_builder<'a>(
         &'a self,
-        client: &'a reqwest::Client,
+        client: &'a CodexHttpClient,
         auth: &Option<CodexAuth>,
-    ) -> crate::error::Result<reqwest::RequestBuilder> {
+    ) -> crate::error::Result<CodexRequestBuilder> {
         let effective_auth = if let Some(secret_key) = &self.experimental_bearer_token {
             Some(CodexAuth::from_api_key(secret_key))
         } else {
@@ -202,9 +189,9 @@ impl ModelProviderInfo {
     }
 
     /// Apply provider-specific HTTP headers (both static and environment-based)
-    /// onto an existing `reqwest::RequestBuilder` and return the updated
+    /// onto an existing [`CodexRequestBuilder`] and return the updated
     /// builder.
-    fn apply_http_headers(&self, mut builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    fn apply_http_headers(&self, mut builder: CodexRequestBuilder) -> CodexRequestBuilder {
         if let Some(extra) = &self.http_headers {
             for (k, v) in extra {
                 builder = builder.header(k, v);
@@ -322,8 +309,6 @@ pub fn built_in_model_providers() -> HashMap<String, ModelProviderInfo> {
                 stream_max_retries: None,
                 stream_idle_timeout_ms: None,
                 requires_openai_auth: true,
-                provider_kind: ProviderKind::OpenAiResponses,
-                reasoning_controls: ProviderReasoningControls::default(),
             },
         ),
         (BUILT_IN_OSS_MODEL_PROVIDER_ID, create_oss_provider()),
@@ -369,8 +354,6 @@ pub fn create_oss_provider_with_base_url(base_url: &str) -> ModelProviderInfo {
         stream_max_retries: None,
         stream_idle_timeout_ms: None,
         requires_openai_auth: false,
-        provider_kind: ProviderKind::Ollama,
-        reasoning_controls: ProviderReasoningControls::default(),
     }
 }
 
@@ -384,19 +367,6 @@ fn matches_azure_responses_base_url(base_url: &str) -> bool {
         "azurefd.",
     ];
     AZURE_MARKERS.iter().any(|marker| base.contains(marker))
-}
-
-pub fn oss_model_supports_tools(model: &str) -> bool {
-    let slug_without_namespace = model
-        .rsplit_once('/')
-        .map(|(_, slug)| slug)
-        .unwrap_or(model);
-    let slug_without_variant = slug_without_namespace
-        .split_once(':')
-        .map(|(slug, _)| slug)
-        .unwrap_or(slug_without_namespace);
-
-    slug_without_variant.starts_with("gpt-oss") && !slug_without_namespace.contains("qwen2.5vl")
 }
 
 #[cfg(test)]
@@ -424,8 +394,6 @@ base_url = "http://localhost:11434/v1"
             stream_max_retries: None,
             stream_idle_timeout_ms: None,
             requires_openai_auth: false,
-            provider_kind: ProviderKind::OpenAiResponses,
-            reasoning_controls: ProviderReasoningControls::default(),
         };
 
         let provider: ModelProviderInfo = toml::from_str(azure_provider_toml).unwrap();
@@ -456,8 +424,6 @@ query_params = { api-version = "2025-04-01-preview" }
             stream_max_retries: None,
             stream_idle_timeout_ms: None,
             requires_openai_auth: false,
-            provider_kind: ProviderKind::OpenAiResponses,
-            reasoning_controls: ProviderReasoningControls::default(),
         };
 
         let provider: ModelProviderInfo = toml::from_str(azure_provider_toml).unwrap();
@@ -491,8 +457,6 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
             stream_max_retries: None,
             stream_idle_timeout_ms: None,
             requires_openai_auth: false,
-            provider_kind: ProviderKind::OpenAiResponses,
-            reasoning_controls: ProviderReasoningControls::default(),
         };
 
         let provider: ModelProviderInfo = toml::from_str(azure_provider_toml).unwrap();
@@ -516,8 +480,6 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
                 stream_max_retries: None,
                 stream_idle_timeout_ms: None,
                 requires_openai_auth: false,
-                provider_kind: ProviderKind::OpenAiResponses,
-                reasoning_controls: ProviderReasoningControls::default(),
             }
         }
 
@@ -551,8 +513,6 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
             stream_max_retries: None,
             stream_idle_timeout_ms: None,
             requires_openai_auth: false,
-            provider_kind: ProviderKind::OpenAiResponses,
-            reasoning_controls: ProviderReasoningControls::default(),
         };
         assert!(named_provider.is_azure_responses_endpoint());
 
