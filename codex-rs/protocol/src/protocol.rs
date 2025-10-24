@@ -544,6 +544,9 @@ pub enum EventMsg {
 
     /// Prompt the client to preview candidate memories retrieved for the current turn.
     MemoryPreview(MemoryPreviewEvent),
+
+    RawResponseItem(ResponseItem),
+
     ItemStarted(ItemStartedEvent),
     ItemCompleted(ItemCompletedEvent),
 }
