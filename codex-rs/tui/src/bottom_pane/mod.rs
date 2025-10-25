@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::app_event_sender::AppEventSender;
 use crate::tui::FrameRequester;
-pub(crate) use bottom_pane_view::BottomPaneView;
+use bottom_pane_view::BottomPaneView;
 use codex_file_search::FileMatch;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -22,18 +22,20 @@ mod chat_composer;
 mod chat_composer_history;
 mod command_popup;
 pub mod custom_prompt_view;
-mod feedback_view;
 mod file_search_popup;
 mod footer;
 mod list_selection_view;
 mod prompt_args;
 pub(crate) use list_selection_view::SelectionViewParams;
+mod feedback_view;
+pub(crate) use feedback_view::feedback_selection_params;
+pub(crate) use feedback_view::feedback_upload_consent_params;
 mod paste_burst;
 pub mod popup_consts;
 mod scroll_state;
 mod selection_popup_common;
 mod textarea;
-pub(crate) use feedback_view::FeedbackView;
+pub(crate) use feedback_view::FeedbackNoteView;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CancellationEvent {
@@ -238,11 +240,8 @@ impl BottomPane {
             CancellationEvent::NotHandled
         } else {
             self.view_stack.pop();
-            let cleared = self.composer.clear_for_ctrl_c();
+            self.clear_composer_for_ctrl_c();
             self.show_ctrl_c_quit_hint();
-            if cleared.is_some() {
-                self.request_redraw();
-            }
             CancellationEvent::Handled
         }
     }
@@ -272,6 +271,11 @@ impl BottomPane {
     /// Replace the composer text with `text`.
     pub(crate) fn set_composer_text(&mut self, text: String) {
         self.composer.set_text_content(text);
+        self.request_redraw();
+    }
+
+    pub(crate) fn clear_composer_for_ctrl_c(&mut self) {
+        self.composer.clear_for_ctrl_c();
         self.request_redraw();
     }
 
@@ -362,16 +366,6 @@ impl BottomPane {
 
         self.context_window_percent = percent;
         self.composer.set_context_window_percent(percent);
-        self.request_redraw();
-    }
-
-    pub(crate) fn set_index_status_line(&mut self, status: Option<String>) {
-        self.composer.set_index_status_line(status);
-        self.request_redraw();
-    }
-
-    pub(crate) fn set_rate_limit_summaries(&mut self, summaries: Vec<String>) {
-        self.composer.set_rate_limit_summaries(summaries);
         self.request_redraw();
     }
 

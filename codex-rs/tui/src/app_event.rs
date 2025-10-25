@@ -1,36 +1,17 @@
 use std::path::PathBuf;
 
-use codex_agentic_core::index::events::IndexEvent;
-use codex_agentic_core::index::query::QueryHit;
+use codex_common::approval_presets::ApprovalPreset;
 use codex_common::model_presets::ModelPreset;
-use codex_core::config_types::ProviderKind;
 use codex_core::protocol::ConversationPathResponseEvent;
 use codex_core::protocol::Event;
-use codex_core::protocol::MemoryPreviewEvent;
 use codex_file_search::FileMatch;
 
 use crate::bottom_pane::ApprovalRequest;
 use crate::history_cell::HistoryCell;
-use crate::index_delta::SnapshotDiff;
-use crate::index_status::IndexStatusSnapshot;
 
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
 use codex_core::protocol_config_types::ReasoningEffort;
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct CustomProviderForm {
-    pub name: String,
-    pub provider_id: String,
-    pub base_url: Option<String>,
-    pub default_model: Option<String>,
-    pub extra_headers: Option<String>,
-    pub provider_kind: ProviderKind,
-    pub think_enabled: bool,
-    pub postprocess_reasoning: bool,
-    pub anthropic_budget_tokens: Option<u32>,
-    pub anthropic_budget_weight: Option<f32>,
-}
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
@@ -63,56 +44,6 @@ pub(crate) enum AppEvent {
     /// Result of computing a `/diff` command.
     DiffResult(String),
 
-    /// Index worker emitted an event during build.
-    IndexProgress(IndexEvent),
-
-    /// Refresh cached index status snapshot.
-    IndexStatusUpdated(Option<IndexStatusSnapshot>),
-
-    /// Periodic refresh tick for index status labels.
-    IndexStatusTick,
-
-    /// Frequent tick to retire transient toasts.
-    IndexToastTick,
-
-    /// Filesystem delta detected that should trigger an index refresh.
-    IndexDeltaDetected(SnapshotDiff),
-
-    /// Request to start a semantic index build.
-    StartIndexBuild,
-
-    /// Launch the search manager modal after `/search-code` without arguments.
-    OpenSearchManager,
-
-    /// Prompt for a search query.
-    SearchCodePrompt,
-
-    /// Prompt for a new minimum confidence value.
-    SearchConfidencePrompt,
-
-    /// Request to run a semantic code search for the given query.
-    SearchCodeRequested {
-        query: String,
-    },
-
-    /// Persist a new minimum confidence value from the prompt.
-    SearchConfidenceSubmitted {
-        raw: String,
-    },
-
-    /// Completed search results for a `/search-code` query.
-    SearchCodeResult {
-        query: String,
-        confidence: f32,
-        hits: Vec<QueryHit>,
-    },
-
-    /// Error while running a `/search-code` query.
-    SearchCodeError {
-        query: String,
-        error: String,
-    },
-
     InsertHistoryCell(Box<dyn HistoryCell>),
 
     StartCommitAnimation,
@@ -136,11 +67,25 @@ pub(crate) enum AppEvent {
         model: ModelPreset,
     },
 
+    /// Open the confirmation prompt before enabling full access mode.
+    OpenFullAccessConfirmation {
+        preset: ApprovalPreset,
+    },
+
     /// Update the current approval policy in the running app and widget.
     UpdateAskForApprovalPolicy(AskForApproval),
 
     /// Update the current sandbox policy in the running app and widget.
     UpdateSandboxPolicy(SandboxPolicy),
+
+    /// Update whether the full access warning prompt has been acknowledged.
+    UpdateFullAccessWarningAcknowledged(bool),
+
+    /// Persist the acknowledgement flag for the full access warning prompt.
+    PersistFullAccessWarningAcknowledged,
+
+    /// Re-open the approval presets popup.
+    OpenApprovalsPopup,
 
     /// Forwarded conversation history snapshot from the current conversation.
     ConversationHistory(ConversationPathResponseEvent),
@@ -157,83 +102,22 @@ pub(crate) enum AppEvent {
     /// Open the approval popup.
     FullScreenApprovalRequest(ApprovalRequest),
 
-    /// Launch the BYOK manager modal.
-    OpenByokManager,
-
-    /// Launch the memory manager overlay.
-    OpenMemoryManager,
-
-    /// Display memory preview candidates for the current turn.
-    OpenMemoryPreview {
-        preview: MemoryPreviewEvent,
+    /// Open the feedback note entry overlay after the user selects a category.
+    OpenFeedbackNote {
+        category: FeedbackCategory,
+        include_logs: bool,
     },
 
-    /// Show actions for a specific custom provider.
-    ShowByokProviderActions {
-        provider_id: String,
-    },
-
-    /// Begin editing or creating a BYOK provider.
-    StartByokEdit {
-        existing_id: Option<String>,
-    },
-
-    /// Submit BYOK provider form data.
-    SubmitByokForm {
-        original_id: Option<String>,
-        form: CustomProviderForm,
-    },
-
-    /// Confirm and perform provider deletion.
-    DeleteCustomProvider {
-        provider_id: String,
-    },
-
-    /// Result of asynchronously fetching models for a custom provider.
-    CustomProviderModelsFetched {
-        provider_id: String,
-        result: std::result::Result<Vec<String>, String>,
-    },
-
-    /// Begin editing a draft field for a custom provider.
-    BeginByokFieldEdit {
-        field: ByokDraftField,
-    },
-
-    /// Apply a new value to a draft field.
-    UpdateByokDraftField {
-        field: ByokDraftField,
-        value: String,
-    },
-
-    /// Cycle the provider kind for the BYOK draft.
-    CycleByokProviderKind,
-
-    /// Toggle Ollama thinking flag for the BYOK draft.
-    ToggleByokThink,
-
-    /// Toggle postprocess reasoning flag for the BYOK draft.
-    ToggleByokPostprocess,
-
-    /// Refresh models by testing connectivity for a provider.
-    RefreshByokProviderModels {
-        provider_id: String,
-    },
-
-    /// Show cached models for a provider.
-    ShowByokProviderModels {
-        provider_id: String,
+    /// Open the upload consent popup for feedback after selecting a category.
+    OpenFeedbackConsent {
+        category: FeedbackCategory,
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum ByokDraftField {
-    Name,
-    ProviderId,
-    BaseUrl,
-    DefaultModel,
-    ApiKey,
-    ExtraHeaders,
-    AnthropicBudgetTokens,
-    AnthropicBudgetWeight,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FeedbackCategory {
+    BadResult,
+    GoodResult,
+    Bug,
+    Other,
 }

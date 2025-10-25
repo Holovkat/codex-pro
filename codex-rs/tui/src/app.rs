@@ -997,6 +997,15 @@ impl App {
                 sanitize_reasoning_overrides(&mut self.config);
                 sanitize_tool_overrides(&mut self.config);
             }
+            AppEvent::OpenFeedbackNote {
+                category,
+                include_logs,
+            } => {
+                self.chat_widget.open_feedback_note(category, include_logs);
+            }
+            AppEvent::OpenFeedbackConsent { category } => {
+                self.chat_widget.open_feedback_consent(category);
+            }
             AppEvent::PersistModelSelection { model, effort } => {
                 let profile = self.active_profile.as_deref();
                 match persist_model_selection(&self.config.codex_home, profile, &model, effort)
