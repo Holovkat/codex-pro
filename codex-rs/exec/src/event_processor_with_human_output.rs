@@ -27,7 +27,6 @@ use codex_core::protocol::StreamErrorEvent;
 use codex_core::protocol::TaskCompleteEvent;
 use codex_core::protocol::TurnAbortReason;
 use codex_core::protocol::TurnDiffEvent;
-use codex_core::protocol::WebSearchBeginEvent;
 use codex_core::protocol::WebSearchEndEvent;
 use codex_protocol::num_format::format_with_separators;
 use owo_colors::OwoColorize;
@@ -227,7 +226,6 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                     cwd.to_string_lossy(),
                 );
             }
-            EventMsg::ExecCommandOutputDelta(_) => {}
             EventMsg::ExecCommandEnd(ExecCommandEndEvent {
                 aggregated_output,
                 duration,
@@ -294,7 +292,6 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                     }
                 }
             }
-            EventMsg::WebSearchBegin(WebSearchBeginEvent { call_id: _ }) => {}
             EventMsg::WebSearchEnd(WebSearchEndEvent { call_id: _, query }) => {
                 ts_msg!(self, "🌐 Searched: {query}");
             }
@@ -422,12 +419,6 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 );
                 eprintln!("{unified_diff}");
             }
-            EventMsg::ExecApprovalRequest(_) => {
-                // Should we exit?
-            }
-            EventMsg::ApplyPatchApprovalRequest(_) => {
-                // Should we exit?
-            }
             EventMsg::AgentReasoning(agent_reasoning_event) => {
                 if self.show_agent_reasoning {
                     ts_msg!(
@@ -524,15 +515,24 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 }
             },
             EventMsg::ShutdownComplete => return CodexStatus::Shutdown,
-            EventMsg::UserMessage(_) => {}
-            EventMsg::EnteredReviewMode(_) => {}
-            EventMsg::ExitedReviewMode(_) => {}
-            EventMsg::AgentMessageDelta(_) => {}
-            EventMsg::AgentReasoningDelta(_) => {}
-            EventMsg::AgentReasoningRawContentDelta(_) => {}
-            EventMsg::ItemStarted(_) => {}
-            EventMsg::ItemCompleted(_) => {}
-            EventMsg::RawResponseItem(_) => {}
+            EventMsg::WebSearchBegin(_)
+            | EventMsg::ExecApprovalRequest(_)
+            | EventMsg::ApplyPatchApprovalRequest(_)
+            | EventMsg::ExecCommandOutputDelta(_)
+            | EventMsg::GetHistoryEntryResponse(_)
+            | EventMsg::McpListToolsResponse(_)
+            | EventMsg::ListCustomPromptsResponse(_)
+            | EventMsg::UserMessage(_)
+            | EventMsg::EnteredReviewMode(_)
+            | EventMsg::ExitedReviewMode(_)
+            | EventMsg::AgentMessageDelta(_)
+            | EventMsg::AgentReasoningDelta(_)
+            | EventMsg::AgentReasoningRawContentDelta(_)
+            | EventMsg::ItemStarted(_)
+            | EventMsg::ItemCompleted(_)
+            | EventMsg::RawResponseItem(_)
+            | EventMsg::UndoCompleted(_)
+            | EventMsg::UndoStarted(_) => {}
         }
         CodexStatus::Running
     }
