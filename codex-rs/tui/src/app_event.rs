@@ -6,6 +6,7 @@ use codex_common::model_presets::ModelPreset;
 use codex_core::config_types::ProviderKind;
 use codex_core::protocol::ConversationPathResponseEvent;
 use codex_core::protocol::Event;
+use codex_core::protocol::MemoryPreviewEvent;
 use codex_file_search::FileMatch;
 
 use crate::bottom_pane::ApprovalRequest;
@@ -163,6 +164,14 @@ pub(crate) enum AppEvent {
 
     /// Launch the BYOK manager modal.
     OpenByokManager,
+
+    /// Launch the memory manager overlay.
+    OpenMemoryManager,
+
+    /// Display memory preview candidates for the current turn.
+    OpenMemoryPreview {
+        preview: MemoryPreviewEvent,
+    },
 
     /// Show actions for a specific custom provider.
     ShowByokProviderActions {

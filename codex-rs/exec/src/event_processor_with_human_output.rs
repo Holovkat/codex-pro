@@ -498,6 +498,9 @@ impl EventProcessor for EventProcessorWithHumanOutput {
             EventMsg::ListCustomPromptsResponse(_) => {
                 // Currently ignored in exec output.
             }
+            EventMsg::MemoryPreview(_) => {
+                // CLI agent does not support interactive memory preview.
+            }
             EventMsg::ViewImageToolCall(view) => {
                 ts_msg!(
                     self,

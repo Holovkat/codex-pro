@@ -42,6 +42,9 @@ codex-cloud-tasks = { path = "../cloud-tasks" }
 ctor = { workspace = true }
 owo-colors = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+chrono = { workspace = true }
+uuid = { workspace = true }
 supports-color = { workspace = true }
 tokio = { workspace = true, features = [
     "io-std",
@@ -56,4 +59,5 @@ assert_matches = { workspace = true }
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
 pretty_assertions = { workspace = true }
+sha2 = { workspace = true }
 tempfile = { workspace = true }

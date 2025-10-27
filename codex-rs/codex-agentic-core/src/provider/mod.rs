@@ -341,7 +341,7 @@ pub fn custom_provider_model_info(provider_id: &str, custom: &CustomProvider) ->
             } else {
                 trimmed.to_string()
             };
-            Some(format!("{}/v1", chat_base))
+            Some(format!("{chat_base}/v1"))
         }
         _ => custom.base_url.clone(),
     };

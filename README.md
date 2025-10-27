@@ -77,6 +77,9 @@ Codex CLI supports a rich set of configuration options, with preferences stored 
   - [Example prompts](./docs/getting-started.md#example-prompts)
   - [Memory with AGENTS.md](./docs/getting-started.md#memory-with-agentsmd)
   - [Configuration](./docs/config.md)
+- [**Memory manager & context store**](./designs/codex-pro/functional-design/23-MEMORY-MANAGER-IMPLEMENTATION.md)
+  - `codex memory` CLI administration (init/list/search/create/edit/delete/rebuild/reset)
+  - `/memory` TUI overlay with semantic search, confidence controls, MiniCPM status, and preview flows
 - [**Sandbox & approvals**](./docs/sandbox.md)
 - [**Authentication**](./docs/authentication.md)
   - [Auth methods](./docs/authentication.md#forcing-a-specific-auth-method-advanced)

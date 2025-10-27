@@ -1823,8 +1823,8 @@ mod tests {
             composer.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
         assert_eq!(result, InputResult::None);
         assert!(needs_redraw, "typing should still mark the view dirty");
-        std::thread::sleep(ChatComposer::recommended_paste_flush_delay());
-        let _ = composer.flush_paste_burst_if_due();
+        let future = std::time::Instant::now() + ChatComposer::recommended_paste_flush_delay();
+        composer.handle_paste_burst_flush(future);
         assert_eq!(composer.textarea.text(), "h?");
         assert_eq!(composer.footer_mode, FooterMode::ShortcutSummary);
         assert_eq!(composer.footer_mode(), FooterMode::ContextOnly);
@@ -3276,8 +3276,8 @@ mod tests {
             composer.textarea.text().is_empty(),
             "text should remain empty until flush"
         );
-        std::thread::sleep(ChatComposer::recommended_paste_flush_delay());
-        let flushed = composer.flush_paste_burst_if_due();
+        let future = std::time::Instant::now() + ChatComposer::recommended_paste_flush_delay();
+        let flushed = composer.handle_paste_burst_flush(future);
         assert!(flushed, "expected buffered text to flush after stop");
         assert_eq!(composer.textarea.text(), "a".repeat(count));
         assert!(
@@ -3310,8 +3310,8 @@ mod tests {
 
         // Nothing should appear until we stop and flush
         assert!(composer.textarea.text().is_empty());
-        std::thread::sleep(ChatComposer::recommended_paste_flush_delay());
-        let flushed = composer.flush_paste_burst_if_due();
+        let future = std::time::Instant::now() + ChatComposer::recommended_paste_flush_delay();
+        let flushed = composer.handle_paste_burst_flush(future);
         assert!(flushed, "expected flush after stopping fast input");
 
         let expected_placeholder = format!("[Pasted Content {count} chars]");

@@ -33,9 +33,11 @@ use supports_color::Stream;
 mod acp_cmd;
 mod agentic_commands;
 mod mcp_cmd;
+mod memory_cmd;
 
 use crate::acp_cmd::AcpCli;
 use crate::mcp_cmd::McpCli;
+use crate::memory_cmd::MemoryCli;
 use agentic_commands::build_cli_registry;
 use agentic_commands::command_output_to_string;
 use codex_core::config::Config;
@@ -141,6 +143,9 @@ enum Subcommand {
 
     /// Inspect feature flags.
     Features(FeaturesCli),
+
+    /// Manage the global memory store.
+    Memory(MemoryCli),
 }
 
 #[derive(Debug, Parser)]
@@ -489,6 +494,9 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
             // Propagate any root-level config overrides (e.g. `-c key=value`).
             prepend_config_flags(&mut mcp_cli.config_overrides, root_config_overrides.clone());
             mcp_cli.run().await?;
+        }
+        Some(Subcommand::Memory(memory_cli)) => {
+            memory_cmd::run(memory_cli, root_config_overrides.clone()).await?;
         }
         Some(Subcommand::AppServer) => {
             codex_app_server::run_main(codex_linux_sandbox_exe, root_config_overrides).await?;

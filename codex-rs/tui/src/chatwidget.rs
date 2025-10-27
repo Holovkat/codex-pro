@@ -32,6 +32,7 @@ use codex_core::protocol::ListCustomPromptsResponseEvent;
 use codex_core::protocol::McpListToolsResponseEvent;
 use codex_core::protocol::McpToolCallBeginEvent;
 use codex_core::protocol::McpToolCallEndEvent;
+use codex_core::protocol::MemoryPreviewEvent;
 use codex_core::protocol::Op;
 use codex_core::protocol::PatchApplyBeginEvent;
 use codex_core::protocol::RateLimitSnapshot;
@@ -636,6 +637,11 @@ impl ChatWidget {
         debug!("BackgroundEvent: {message}");
     }
 
+    fn on_memory_preview(&mut self, event: MemoryPreviewEvent) {
+        self.app_event_tx
+            .send(AppEvent::OpenMemoryPreview { preview: event });
+    }
+
     fn on_stream_error(&mut self, message: String) {
         // Show stream errors in the transcript so users see retry/backoff info.
         self.add_to_history(history_cell::new_stream_error_event(message));
@@ -1169,6 +1175,9 @@ impl ChatWidget {
                     }
                 }
             }
+            SlashCommand::Memory => {
+                self.app_event_tx.send(AppEvent::OpenMemoryManager);
+            }
             SlashCommand::Quit => {
                 self.app_event_tx.send(AppEvent::ExitRequest);
             }
@@ -1498,6 +1507,7 @@ impl ChatWidget {
                 self.on_background_event(message)
             }
             EventMsg::StreamError(StreamErrorEvent { message }) => self.on_stream_error(message),
+            EventMsg::MemoryPreview(event) => self.on_memory_preview(event),
             EventMsg::UserMessage(ev) => {
                 if from_replay {
                     self.on_user_message_event(ev);

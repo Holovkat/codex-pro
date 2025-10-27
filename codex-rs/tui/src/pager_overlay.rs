@@ -2,16 +2,19 @@ use std::io::Result;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::app_event_sender::AppEventSender;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::UserHistoryCell;
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
+use crate::memory_preview_overlay::MemoryPreviewOverlay;
 use crate::render::Insets;
 use crate::render::renderable::InsetRenderable;
 use crate::render::renderable::Renderable;
 use crate::style::user_message_style;
 use crate::tui;
 use crate::tui::TuiEvent;
+use codex_core::protocol::MemoryPreviewEvent;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use ratatui::buffer::Buffer;
@@ -30,6 +33,7 @@ use ratatui::widgets::WidgetRef;
 pub(crate) enum Overlay {
     Transcript(TranscriptOverlay),
     Static(StaticOverlay),
+    MemoryPreview(MemoryPreviewOverlay),
 }
 
 impl Overlay {
@@ -48,10 +52,21 @@ impl Overlay {
         Self::Static(StaticOverlay::with_renderables(renderables, title))
     }
 
+    pub(crate) fn new_memory_preview(
+        event: MemoryPreviewEvent,
+        app_event_tx: AppEventSender,
+    ) -> Self {
+        Self::MemoryPreview(MemoryPreviewOverlay::new(event, app_event_tx))
+    }
+
     pub(crate) fn handle_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
         match self {
             Overlay::Transcript(o) => o.handle_event(tui, event),
             Overlay::Static(o) => o.handle_event(tui, event),
+            Overlay::MemoryPreview(o) => {
+                o.handle_event(tui, event);
+                Ok(())
+            }
         }
     }
 
@@ -59,6 +74,7 @@ impl Overlay {
         match self {
             Overlay::Transcript(o) => o.is_done(),
             Overlay::Static(o) => o.is_done(),
+            Overlay::MemoryPreview(o) => o.is_done(),
         }
     }
 }

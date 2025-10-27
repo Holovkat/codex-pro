@@ -1,0 +1,34 @@
+---
+source: tui/src/memory_manager.rs
+expression: screen
+---
+┌Memory Manager────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│[S]earch: type to filter…                                                                          Select [m]ode: user│
+│CF ≥  75% [+/-]                                                                                                       │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌Recent Memories───────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│[x] 2025-01-02 19:30   91%  cli, docs  Summarise CLI install steps for offline docs                                   │
+│[x] 2025-01-01 23:00   82%  product, onboarding  Review onboarding flow for regression notes                          │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+[+/-] CF   [Space] toggle   [A] select all   [N] new   [Enter] edit   [D] delete   [R] rebuild   [Shift+R] reset   [Esc]
+Memories: 2

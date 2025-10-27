@@ -221,6 +221,10 @@ async fn run_codex_tool_session_inner(
                         .await;
                         continue;
                     }
+                    EventMsg::MemoryPreview(_) => {
+                        // UI-only event; agentic tool runner ignores it.
+                        continue;
+                    }
                     EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }) => {
                         let text = match last_agent_message {
                             Some(msg) => msg,

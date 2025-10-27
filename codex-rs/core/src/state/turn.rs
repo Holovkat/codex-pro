@@ -9,6 +9,7 @@ use tokio::task::AbortHandle;
 use codex_protocol::models::ResponseInputItem;
 use tokio::sync::oneshot;
 
+use crate::memory::types::MemoryHit;
 use crate::protocol::ReviewDecision;
 use crate::tasks::SessionTask;
 
@@ -71,6 +72,8 @@ impl ActiveTurn {
 pub(crate) struct TurnState {
     pending_approvals: HashMap<String, oneshot::Sender<ReviewDecision>>,
     pending_input: Vec<ResponseInputItem>,
+    memory_preview_hits: Option<Vec<MemoryHit>>,
+    memory_context_inserted: bool,
 }
 
 impl TurnState {
@@ -92,6 +95,8 @@ impl TurnState {
     pub(crate) fn clear_pending(&mut self) {
         self.pending_approvals.clear();
         self.pending_input.clear();
+        self.memory_preview_hits = None;
+        self.memory_context_inserted = false;
     }
 
     pub(crate) fn push_pending_input(&mut self, input: ResponseInputItem) {
@@ -106,6 +111,22 @@ impl TurnState {
             std::mem::swap(&mut ret, &mut self.pending_input);
             ret
         }
+    }
+
+    pub(crate) fn memory_context_inserted(&self) -> bool {
+        self.memory_context_inserted
+    }
+
+    pub(crate) fn set_memory_context_inserted(&mut self) {
+        self.memory_context_inserted = true;
+    }
+
+    pub(crate) fn set_memory_preview_hits(&mut self, hits: Vec<MemoryHit>) {
+        self.memory_preview_hits = Some(hits);
+    }
+
+    pub(crate) fn take_memory_preview_hits(&mut self) -> Option<Vec<MemoryHit>> {
+        self.memory_preview_hits.take()
     }
 }
 

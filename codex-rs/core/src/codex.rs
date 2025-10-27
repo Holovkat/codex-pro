@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,6 +19,8 @@ use codex_protocol::ConversationId;
 use codex_protocol::protocol::ConversationPathResponseEvent;
 use codex_protocol::protocol::ExitedReviewModeEvent;
 use codex_protocol::protocol::McpAuthStatus;
+use codex_protocol::protocol::MemoryPreviewEntry;
+use codex_protocol::protocol::MemoryPreviewEvent;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
@@ -43,6 +46,7 @@ use tracing::error;
 use tracing::info;
 use tracing::trace;
 use tracing::warn;
+use uuid::Uuid;
 
 use crate::ModelProviderInfo;
 use crate::apply_patch::convert_apply_patch_to_protocol;
@@ -66,6 +70,13 @@ use crate::executor::ExecutorConfig;
 use crate::executor::normalize_exec_result;
 use crate::mcp::auth::compute_auth_statuses;
 use crate::mcp_connection_manager::McpConnectionManager;
+use crate::memory::MemoryDistiller;
+use crate::memory::MemoryHit;
+use crate::memory::MemoryPreviewModeExt;
+use crate::memory::MemoryRecorder;
+use crate::memory::MemoryRecorderConfig;
+use crate::memory::MemoryRetriever;
+use crate::memory::MemoryRuntime;
 use crate::model_family::find_family_for_model;
 use crate::openai_model_info::get_model_info;
 use crate::openai_tools::ToolsConfig;
@@ -254,6 +265,11 @@ pub(crate) struct Session {
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) services: SessionServices,
     next_internal_sub_id: AtomicU64,
+    memory_recorder: MemoryRecorder,
+    #[allow(dead_code)]
+    memory_distiller: MemoryDistiller,
+    #[allow(dead_code)]
+    memory_runtime: Option<MemoryRuntime>,
 }
 
 /// The context needed for a single turn of the conversation.
@@ -342,7 +358,7 @@ impl Session {
             return Err(anyhow::anyhow!("cwd is not absolute: {cwd:?}"));
         }
 
-        let (conversation_id, rollout_params) = match &initial_history {
+        let (conversation_id, rollout_params, resumed_root) = match &initial_history {
             InitialHistory::New | InitialHistory::Forked(_) => {
                 let conversation_id = ConversationId::default();
                 (
@@ -352,11 +368,13 @@ impl Session {
                         user_instructions.clone(),
                         session_source,
                     ),
+                    None,
                 )
             }
             InitialHistory::Resumed(resumed_history) => (
                 resumed_history.conversation_id,
                 RolloutRecorderParams::resume(resumed_history.rollout_path.clone()),
+                Some(resumed_history.rollout_path.clone()),
             ),
         };
 
@@ -514,6 +532,19 @@ impl Session {
                 config.codex_linux_sandbox_exe.clone(),
             )),
         };
+        let memory_root = resumed_root.unwrap_or_else(|| config.codex_home.join("memory"));
+        let (memory_distiller, memory_runtime) = match MemoryDistiller::spawn(memory_root).await {
+            Ok((distiller, runtime)) => (distiller, Some(runtime)),
+            Err(err) => {
+                warn!("disabling memory distillation: {err:#}");
+                (MemoryDistiller::noop(), None)
+            }
+        };
+        let memory_recorder = MemoryRecorder::new(MemoryRecorderConfig {
+            conversation_id,
+            session_source: Some(format!("{session_source:?}")),
+            sink: Some(memory_distiller.sender()),
+        });
 
         let sess = Arc::new(Session {
             conversation_id,
@@ -522,6 +553,9 @@ impl Session {
             active_turn: Mutex::new(None),
             services,
             next_internal_sub_id: AtomicU64::new(0),
+            memory_recorder,
+            memory_distiller,
+            memory_runtime,
         });
 
         // Dispatch the SessionConfiguredEvent first and then report any errors.
@@ -741,8 +775,11 @@ impl Session {
 
     /// Append ResponseItems to the in-memory conversation history only.
     async fn record_into_history(&self, items: &[ResponseItem]) {
-        let mut state = self.state.lock().await;
-        state.record_items(items.iter());
+        {
+            let mut state = self.state.lock().await;
+            state.record_items(items.iter());
+        }
+        self.memory_recorder.record_response_items(items);
     }
 
     async fn replace_history(&self, items: Vec<ResponseItem>) {
@@ -771,6 +808,89 @@ impl Session {
             Some(self.user_shell().clone()),
         )));
         items
+    }
+
+    async fn inject_memory_context(
+        &self,
+        _turn_context: &TurnContext,
+        turn_input: &mut Vec<ResponseItem>,
+    ) {
+        let Some(runtime) = &self.memory_runtime else {
+            return;
+        };
+        let Some(query_text) = latest_user_message_text(turn_input) else {
+            return;
+        };
+
+        let turn_state_arc = {
+            let active = self.active_turn.lock().await;
+            active.as_ref().map(|at| Arc::clone(&at.turn_state))
+        };
+        if let Some(ref state_arc) = turn_state_arc
+            && state_arc.lock().await.memory_context_inserted()
+        {
+            return;
+        }
+
+        let retriever = MemoryRetriever::new(runtime.clone());
+        match retriever.retrieve_for_text(query_text, None).await {
+            Ok(retrieval) => {
+                if !retrieval.has_candidates() {
+                    return;
+                }
+                if retrieval.settings.preview_mode.requires_user_confirmation() {
+                    if let Some(state_arc) = turn_state_arc {
+                        {
+                            let mut ts = state_arc.lock().await;
+                            ts.set_memory_preview_hits(retrieval.candidates.clone());
+                        }
+                        let entries = retrieval
+                            .candidates
+                            .iter()
+                            .map(|hit| MemoryPreviewEntry {
+                                record_id: hit.record.record_id.to_string(),
+                                summary: hit.record.summary.clone(),
+                                confidence: hit.record.confidence,
+                                score: hit.score,
+                            })
+                            .collect();
+                        let event = Event {
+                            id: INITIAL_SUBMIT_ID.to_owned(),
+                            msg: EventMsg::MemoryPreview(MemoryPreviewEvent {
+                                min_confidence: retrieval.settings.min_confidence,
+                                entries,
+                                preview_mode: retrieval.settings.preview_mode,
+                            }),
+                        };
+                        self.send_event(event).await;
+                    } else {
+                        warn!("memory preview requested but no active turn state");
+                    }
+                } else {
+                    let selected = retrieval.auto_selected();
+                    if selected.is_empty() {
+                        return;
+                    }
+                    if let Err(err) = retriever.record_preview_outcome(true).await {
+                        warn!("failed to record memory preview acceptance: {err:#}");
+                    }
+                    let text =
+                        format_memory_hits_message(retrieval.settings.min_confidence, &selected);
+                    turn_input.push(ResponseItem::Message {
+                        id: None,
+                        role: "system".to_string(),
+                        content: vec![ContentItem::OutputText { text }],
+                    });
+                    if let Some(state_arc) = turn_state_arc {
+                        let mut ts = state_arc.lock().await;
+                        ts.set_memory_context_inserted();
+                    }
+                }
+            }
+            Err(err) => {
+                warn!("memory retrieval failed: {err:#}");
+            }
+        }
     }
 
     async fn persist_rollout_items(&self, items: &[RolloutItem]) {
@@ -961,6 +1081,8 @@ impl Session {
                 tracker.get_unified_diff()
             };
             if let Ok(Some(unified_diff)) = unified_diff {
+                self.memory_recorder
+                    .record_file_diff(call_id, &unified_diff);
                 let msg = EventMsg::TurnDiff(TurnDiffEvent { unified_diff });
                 let event = Event {
                     id: sub_id.into(),
@@ -1531,6 +1653,56 @@ async fn submission_loop(
                         .await;
                 }
             }
+            Op::MemoryPreviewDecision { accepted_ids } => {
+                if let Some(runtime) = &sess.memory_runtime {
+                    let accepted_set: HashSet<Uuid> = accepted_ids
+                        .into_iter()
+                        .filter_map(|id| Uuid::parse_str(&id).ok())
+                        .collect();
+                    let hits = {
+                        let mut active = sess.active_turn.lock().await;
+                        match active.as_mut() {
+                            Some(at) => {
+                                let mut ts = at.turn_state.lock().await;
+                                ts.take_memory_preview_hits()
+                            }
+                            None => None,
+                        }
+                    };
+                    if let Some(hits) = hits {
+                        let accepted_hits: Vec<MemoryHit> = hits
+                            .into_iter()
+                            .filter(|hit| accepted_set.contains(&hit.record.record_id))
+                            .collect();
+                        let retriever = MemoryRetriever::new(runtime.clone());
+                        if accepted_hits.is_empty() {
+                            if let Err(err) = retriever.record_preview_outcome(false).await {
+                                warn!("failed to record memory preview skip: {err:#}");
+                            }
+                        } else {
+                            if let Err(err) = retriever.record_preview_outcome(true).await {
+                                warn!("failed to record memory preview acceptance: {err:#}");
+                            }
+                            let min_conf = runtime.settings.get().await.min_confidence;
+                            let text = format_memory_hits_message(min_conf, &accepted_hits);
+                            let message_input = ResponseInputItem::Message {
+                                role: "system".to_string(),
+                                content: vec![ContentItem::OutputText { text }],
+                            };
+                            let mut active = sess.active_turn.lock().await;
+                            if let Some(at) = active.as_mut() {
+                                let mut ts = at.turn_state.lock().await;
+                                ts.push_pending_input(message_input);
+                                ts.set_memory_context_inserted();
+                            }
+                        }
+                    } else {
+                        tracing::debug!("memory preview decision received without pending hits");
+                    }
+                } else {
+                    tracing::debug!("memory preview decision ignored; memory runtime disabled");
+                }
+            }
             Op::Shutdown => {
                 sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
                 info!("Shutting down Codex instance");
@@ -1775,7 +1947,7 @@ pub(crate) async fn run_task(
         //   conversation history on each turn. The rollout file, however, should
         //   only record the new items that originated in this turn so that it
         //   represents an append-only log without duplicates.
-        let turn_input: Vec<ResponseItem> = if is_review_mode {
+        let mut turn_input: Vec<ResponseItem> = if is_review_mode {
             if !pending_input.is_empty() {
                 review_thread_history.extend(pending_input);
             }
@@ -1784,6 +1956,11 @@ pub(crate) async fn run_task(
             sess.record_conversation_items(&pending_input).await;
             sess.turn_input_with_history(pending_input).await
         };
+
+        if !is_review_mode {
+            sess.inject_memory_context(&turn_context, &mut turn_input)
+                .await;
+        }
 
         let turn_input_messages: Vec<String> = turn_input
             .iter()
@@ -2023,6 +2200,46 @@ fn parse_review_output_event(text: &str) -> ReviewOutputEvent {
         overall_explanation: text.to_string(),
         ..Default::default()
     }
+}
+
+fn latest_user_message_text(items: &[ResponseItem]) -> Option<String> {
+    items.iter().rev().find_map(|item| match item {
+        ResponseItem::Message { role, content, .. } if role == "user" => {
+            let combined = content
+                .iter()
+                .filter_map(|ci| match ci {
+                    ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<String>>()
+                .join("\n");
+            if combined.trim().is_empty() {
+                None
+            } else {
+                Some(combined)
+            }
+        }
+        _ => None,
+    })
+}
+
+fn format_memory_hits_message(min_confidence: f32, hits: &[MemoryHit]) -> String {
+    let mut lines = Vec::with_capacity(hits.len().saturating_add(1));
+    lines.push(format!(
+        "Relevant memories (confidence ≥ {:.0}%):",
+        min_confidence * 100.0
+    ));
+    for hit in hits {
+        lines.push(format!(
+            "- ({:.0}% · score {:.2}) {}",
+            hit.record.confidence * 100.0,
+            hit.score,
+            hit.record.summary
+        ));
+    }
+    lines.join("\n")
 }
 
 async fn run_turn(
@@ -2881,6 +3098,9 @@ mod tests {
             active_turn: Mutex::new(None),
             services,
             next_internal_sub_id: AtomicU64::new(0),
+            memory_recorder: MemoryRecorder::disabled(conversation_id),
+            memory_distiller: MemoryDistiller::noop(),
+            memory_runtime: None,
         };
         (session, turn_context)
     }
@@ -2950,6 +3170,9 @@ mod tests {
             active_turn: Mutex::new(None),
             services,
             next_internal_sub_id: AtomicU64::new(0),
+            memory_recorder: MemoryRecorder::disabled(conversation_id),
+            memory_distiller: MemoryDistiller::noop(),
+            memory_runtime: None,
         });
         (session, turn_context, rx_event)
     }

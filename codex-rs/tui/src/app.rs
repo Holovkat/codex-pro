@@ -21,6 +21,7 @@ use crate::index_delta::spawn_delta_monitor;
 use crate::index_status::IndexStatusSnapshot;
 use crate::index_status::format_age;
 use crate::index_worker::IndexWorker;
+use crate::memory_manager::run_memory_manager;
 use crate::pager_overlay::Overlay;
 use crate::render::highlight::highlight_bash_to_lines;
 use crate::resume_picker::ResumeSelection;
@@ -902,6 +903,17 @@ impl App {
             }
             AppEvent::StartIndexBuild => {
                 self.start_index_build();
+            }
+            AppEvent::OpenMemoryManager => {
+                run_memory_manager(tui, &self.config.codex_home).await?;
+            }
+            AppEvent::OpenMemoryPreview { preview } => {
+                let _ = tui.enter_alt_screen();
+                self.overlay = Some(Overlay::new_memory_preview(
+                    preview,
+                    self.app_event_tx.clone(),
+                ));
+                tui.frame_requester().schedule_frame();
             }
             AppEvent::OpenSearchManager => {
                 self.open_search_manager();
