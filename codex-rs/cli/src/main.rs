@@ -42,6 +42,7 @@ use agentic_commands::build_cli_registry;
 use agentic_commands::command_output_to_string;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
+use codex_core::features::is_known_feature_key;
 
 /// Codex CLI
 ///
@@ -238,53 +239,6 @@ struct DiffCommand {
     rest: Vec<String>,
 }
 
-#[derive(Debug, Default, Parser, Clone)]
-struct FeatureToggles {
-    /// Enable a feature (repeatable). Equivalent to `-c features.<name>=true`.
-    #[arg(long = "enable", value_name = "FEATURE", action = clap::ArgAction::Append, global = true)]
-    enable: Vec<String>,
-
-    /// Disable a feature (repeatable). Equivalent to `-c features.<name>=false`.
-    #[arg(long = "disable", value_name = "FEATURE", action = clap::ArgAction::Append, global = true)]
-    disable: Vec<String>,
-}
-
-impl FeatureToggles {
-    fn to_overrides(&self) -> Vec<String> {
-        let mut v = Vec::new();
-        for k in &self.enable {
-            v.push(format!("features.{k}=true"));
-        }
-        for k in &self.disable {
-            v.push(format!("features.{k}=false"));
-        }
-        v
-    }
-}
-
-#[derive(Debug, Parser)]
-struct FeaturesCli {
-    #[command(subcommand)]
-    sub: FeaturesSubcommand,
-}
-
-#[derive(Debug, Parser)]
-enum FeaturesSubcommand {
-    /// List known features with their stage and effective state.
-    List,
-}
-
-fn stage_str(stage: codex_core::features::Stage) -> &'static str {
-    use codex_core::features::Stage;
-    match stage {
-        Stage::Experimental => "experimental",
-        Stage::Beta => "beta",
-        Stage::Stable => "stable",
-        Stage::Deprecated => "deprecated",
-        Stage::Removed => "removed",
-    }
-}
-
 #[derive(Debug, Parser)]
 struct SandboxArgs {
     #[command(subcommand)]
@@ -424,6 +378,66 @@ fn run_update_action(action: UpdateAction) -> anyhow::Result<()> {
     Ok(())
 }
 
+<<<<<<< HEAD
+=======
+#[derive(Debug, Default, Parser, Clone)]
+struct FeatureToggles {
+    /// Enable a feature (repeatable). Equivalent to `-c features.<name>=true`.
+    #[arg(long = "enable", value_name = "FEATURE", action = clap::ArgAction::Append, global = true)]
+    enable: Vec<String>,
+
+    /// Disable a feature (repeatable). Equivalent to `-c features.<name>=false`.
+    #[arg(long = "disable", value_name = "FEATURE", action = clap::ArgAction::Append, global = true)]
+    disable: Vec<String>,
+}
+
+impl FeatureToggles {
+    fn to_overrides(&self) -> anyhow::Result<Vec<String>> {
+        let mut v = Vec::new();
+        for feature in &self.enable {
+            Self::validate_feature(feature)?;
+            v.push(format!("features.{feature}=true"));
+        }
+        for feature in &self.disable {
+            Self::validate_feature(feature)?;
+            v.push(format!("features.{feature}=false"));
+        }
+        Ok(v)
+    }
+
+    fn validate_feature(feature: &str) -> anyhow::Result<()> {
+        if is_known_feature_key(feature) {
+            Ok(())
+        } else {
+            anyhow::bail!("Unknown feature flag: {feature}")
+        }
+    }
+}
+
+#[derive(Debug, Parser)]
+struct FeaturesCli {
+    #[command(subcommand)]
+    sub: FeaturesSubcommand,
+}
+
+#[derive(Debug, Parser)]
+enum FeaturesSubcommand {
+    /// List known features with their stage and effective state.
+    List,
+}
+
+fn stage_str(stage: codex_core::features::Stage) -> &'static str {
+    use codex_core::features::Stage;
+    match stage {
+        Stage::Experimental => "experimental",
+        Stage::Beta => "beta",
+        Stage::Stable => "stable",
+        Stage::Deprecated => "deprecated",
+        Stage::Removed => "removed",
+    }
+}
+
+>>>>>>> 775fbba6e (feat: return an error if unknown enabled/disabled feature (#5817))
 /// As early as possible in the process lifecycle, apply hardening measures. We
 /// skip this in debug builds to avoid interfering with debugging.
 #[ctor::ctor]
@@ -448,9 +462,8 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
     } = MultitoolCli::parse();
 
     // Fold --enable/--disable into config overrides so they flow to all subcommands.
-    root_config_overrides
-        .raw_overrides
-        .extend(feature_toggles.to_overrides());
+    let toggle_overrides = feature_toggles.to_overrides()?;
+    root_config_overrides.raw_overrides.extend(toggle_overrides);
 
     let settings = init_global_settings(load_settings());
     if let Err(err) = init_global_prompt(&settings) {
@@ -843,6 +856,7 @@ mod tests {
     use assert_matches::assert_matches;
     use codex_core::protocol::TokenUsage;
     use codex_protocol::ConversationId;
+    use pretty_assertions::assert_eq;
 
     fn finalize_from_args(args: &[&str]) -> TuiCli {
         let cli = MultitoolCli::try_parse_from(args).expect("parse");
@@ -1018,5 +1032,33 @@ mod tests {
         assert!(interactive.resume_picker);
         assert!(!interactive.resume_last);
         assert_eq!(interactive.resume_session_id, None);
+    }
+
+    #[test]
+    fn feature_toggles_known_features_generate_overrides() {
+        let toggles = FeatureToggles {
+            enable: vec!["web_search_request".to_string()],
+            disable: vec!["unified_exec".to_string()],
+        };
+        let overrides = toggles.to_overrides().expect("valid features");
+        assert_eq!(
+            overrides,
+            vec![
+                "features.web_search_request=true".to_string(),
+                "features.unified_exec=false".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn feature_toggles_unknown_feature_errors() {
+        let toggles = FeatureToggles {
+            enable: vec!["does_not_exist".to_string()],
+            disable: Vec::new(),
+        };
+        let err = toggles
+            .to_overrides()
+            .expect_err("feature should be rejected");
+        assert_eq!(err.to_string(), "Unknown feature flag: does_not_exist");
     }
 }
