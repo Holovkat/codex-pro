@@ -66,6 +66,8 @@ pub mod live_wrap;
 mod markdown;
 mod markdown_render;
 mod markdown_stream;
+mod memory_manager;
+mod memory_preview_overlay;
 pub mod onboarding;
 mod pager_overlay;
 pub mod public_widgets;

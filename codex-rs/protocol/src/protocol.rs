@@ -178,6 +178,21 @@ pub enum Op {
 
     /// Request to shut down codex instance.
     Shutdown,
+
+    /// Submit a decision for the pending memory preview. Empty list skips.
+    MemoryPreviewDecision {
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        accepted_ids: Vec<String>,
+    },
+}
+
+/// Determines the conditions under which the user is consulted to approve
+/// running the command proposed by Codex.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryPreviewMode {
+    Enabled,
+    Disabled,
 }
 
 /// Determines the conditions under which the user is consulted to approve
@@ -524,11 +539,29 @@ pub enum EventMsg {
 
     /// Exited review mode with an optional final result to apply.
     ExitedReviewMode(ExitedReviewModeEvent),
+
+    /// Prompt the client to preview candidate memories retrieved for the current turn.
+    MemoryPreview(MemoryPreviewEvent),
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS)]
 pub struct ExitedReviewModeEvent {
     pub review_output: Option<ReviewOutputEvent>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+pub struct MemoryPreviewEvent {
+    pub min_confidence: f32,
+    pub entries: Vec<MemoryPreviewEntry>,
+    pub preview_mode: MemoryPreviewMode,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+pub struct MemoryPreviewEntry {
+    pub record_id: String,
+    pub summary: String,
+    pub confidence: f32,
+    pub score: f32,
 }
 
 // Individual event payload types matching each `EventMsg` variant.

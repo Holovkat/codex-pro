@@ -31,9 +31,13 @@ dirs = { workspace = true }
 dunce = { workspace = true }
 env-flags = { workspace = true }
 eventsource-stream = { workspace = true }
+fslock = { workspace = true }
 futures = { workspace = true }
+fastembed = { workspace = true }
+hnsw_rs = { workspace = true }
 indexmap = { workspace = true }
 libc = { workspace = true }
+llama_cpp = { workspace = true }
 mcp-types = { workspace = true }
 os_info = { workspace = true }
 portable-pty = { workspace = true }
@@ -43,10 +47,12 @@ reqwest = { workspace = true, features = ["json", "stream"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha1 = { workspace = true }
+sha2 = { workspace = true }
 shlex = { workspace = true }
 similar = { workspace = true }
 strum_macros = { workspace = true }
 tempfile = { workspace = true }
+textwrap = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true, features = [
     "formatting",
@@ -95,6 +101,7 @@ escargot = { workspace = true }
 maplit = { workspace = true }
 predicates = { workspace = true }
 pretty_assertions = { workspace = true }
+codex-agentic-core = { path = "../codex-agentic-core" }
 serial_test = { workspace = true }
 tempfile = { workspace = true }
 tokio-test = { workspace = true }
