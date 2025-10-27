@@ -522,6 +522,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
             | EventMsg::GetHistoryEntryResponse(_)
             | EventMsg::McpListToolsResponse(_)
             | EventMsg::ListCustomPromptsResponse(_)
+            | EventMsg::RawResponseItem(_)
             | EventMsg::UserMessage(_)
             | EventMsg::EnteredReviewMode(_)
             | EventMsg::ExitedReviewMode(_)
@@ -530,7 +531,6 @@ impl EventProcessor for EventProcessorWithHumanOutput {
             | EventMsg::AgentReasoningRawContentDelta(_)
             | EventMsg::ItemStarted(_)
             | EventMsg::ItemCompleted(_)
-            | EventMsg::RawResponseItem(_)
             | EventMsg::UndoCompleted(_)
             | EventMsg::UndoStarted(_) => {}
         }
