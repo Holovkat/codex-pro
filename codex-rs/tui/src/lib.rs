@@ -86,15 +86,14 @@ mod terminal_palette;
 mod text_formatting;
 mod tui;
 mod ui_consts;
-<<<<<<< HEAD
 mod version;
 mod wrapping;
 
 #[cfg(test)]
 pub mod test_backend;
 
-#[cfg(not(debug_assertions))]
-mod updates;
+pub mod updates;
+pub use updates::UpdateAction;
 
 use crate::onboarding::TrustDirectorySelection;
 use crate::onboarding::WSL_INSTRUCTIONS;
@@ -390,7 +389,6 @@ async fn run_ratatui_app(
 
     let mut tui = Tui::new(terminal);
 
-<<<<<<< HEAD
     // Show update banner in terminal history (instead of stderr) so it is visible
     // within the TUI scrollback. Building spans keeps styling consistent.
     #[cfg(not(debug_assertions))]
@@ -462,26 +460,6 @@ async fn run_ratatui_app(
         let mut lines = with_border_with_inner_width(content_lines, inner_width);
         lines.push("".into());
         tui.insert_history_lines(lines);
-=======
-    #[cfg(not(debug_assertions))]
-    {
-        use crate::update_prompt::UpdatePromptOutcome;
-
-        let skip_update_prompt = cli.prompt.as_ref().is_some_and(|prompt| !prompt.is_empty());
-        if !skip_update_prompt {
-            match update_prompt::run_update_prompt_if_needed(&mut tui, &initial_config).await? {
-                UpdatePromptOutcome::Continue => {}
-                UpdatePromptOutcome::RunUpdate(action) => {
-                    crate::tui::restore()?;
-                    return Ok(AppExitInfo {
-                        token_usage: codex_core::protocol::TokenUsage::default(),
-                        conversation_id: None,
-                        update_action: Some(action),
-                    });
-                }
-            }
-        }
->>>>>>> 58159383c (fix terminal corruption that could happen when onboarding and update banner (#5269))
     }
 
     // Initialize high-fidelity session event logging if enabled.
@@ -617,56 +595,6 @@ fn restore() {
         eprintln!(
             "failed to restore terminal. Run `reset` or restart your terminal to recover: {err}"
         );
-<<<<<<< HEAD
-    }
-}
-
-/// Get the update action from the environment.
-/// Returns `None` if not managed by npm, bun, or brew.
-#[cfg(not(debug_assertions))]
-pub(crate) fn get_update_action() -> Option<UpdateAction> {
-    let exe = std::env::current_exe().unwrap_or_default();
-    let managed_by_npm = std::env::var_os("CODEX_MANAGED_BY_NPM").is_some();
-    let managed_by_bun = std::env::var_os("CODEX_MANAGED_BY_BUN").is_some();
-    if managed_by_npm {
-        Some(UpdateAction::NpmGlobalLatest)
-    } else if managed_by_bun {
-        Some(UpdateAction::BunGlobalLatest)
-    } else if cfg!(target_os = "macos")
-        && (exe.starts_with("/opt/homebrew") || exe.starts_with("/usr/local"))
-    {
-        Some(UpdateAction::BrewUpgrade)
-    } else {
-        None
-    }
-}
-
-#[cfg(debug_assertions)]
-pub(crate) fn get_update_action() -> Option<UpdateAction> {
-    None
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UpdateAction {
-    NpmGlobalLatest,
-    BunGlobalLatest,
-    BrewUpgrade,
-}
-
-impl UpdateAction {
-    pub fn command_args(&self) -> (&'static str, &'static [&'static str]) {
-        match self {
-            UpdateAction::NpmGlobalLatest => ("npm", &["install", "-g", "@openai/codex@latest"]),
-            UpdateAction::BunGlobalLatest => ("bun", &["install", "-g", "@openai/codex@latest"]),
-            UpdateAction::BrewUpgrade => ("brew", &["upgrade", "codex"]),
-        }
-    }
-
-    pub fn command_str(&self) -> String {
-        let (cmd, args) = self.command_args();
-        format!("{} {}", cmd, args.join(" "))
-=======
->>>>>>> 58159383c (fix terminal corruption that could happen when onboarding and update banner (#5269))
     }
 }
 
