@@ -265,7 +265,9 @@ pub(crate) struct Session {
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) services: SessionServices,
     memory_recorder: MemoryRecorder,
+    #[allow(dead_code)]
     memory_distiller: MemoryDistiller,
+    #[allow(dead_code)]
     memory_runtime: Option<MemoryRuntime>,
     next_internal_sub_id: AtomicU64,
 }
@@ -405,6 +407,7 @@ impl Session {
         let tools_config = ToolsConfig::new(&ToolsConfigParams {
             model_family: &model_family,
             features: &config.features,
+            allow_tools: config.provider_allows_tool_calls(),
         });
 
         TurnContext {
@@ -548,13 +551,15 @@ impl Session {
             }
         }
 
+        let auth_snapshot = auth_manager.auth();
         let otel_event_manager = OtelEventManager::new(
             conversation_id,
             config.model.as_str(),
             config.model_family.slug.as_str(),
-            auth_manager.auth().and_then(|a| a.get_account_id()),
-            auth_manager.auth().and_then(|a| a.get_account_email()),
-            auth_manager.auth().map(|a| a.mode),
+            auth_snapshot
+                .as_ref()
+                .and_then(super::auth::CodexAuth::get_account_id),
+            auth_snapshot.as_ref().map(|a| a.mode),
             config.otel.log_user_prompt,
             terminal::user_agent(),
         );
@@ -1752,6 +1757,7 @@ async fn spawn_review_thread(
     let tools_config = ToolsConfig::new(&ToolsConfigParams {
         model_family: &review_model_family,
         features: &review_features,
+        allow_tools: config.provider_allows_tool_calls(),
     });
 
     let base_instructions = REVIEW_PROMPT.to_string();
@@ -3001,7 +3007,6 @@ mod tests {
             config.model.as_str(),
             config.model_family.slug.as_str(),
             None,
-            Some("test@test.com".to_string()),
             Some(AuthMode::ChatGPT),
             false,
             "test".to_string(),

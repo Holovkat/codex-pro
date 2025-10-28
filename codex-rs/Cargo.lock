@@ -1351,6 +1351,7 @@ version = "0.47.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "chrono",
  "clap",
  "codex-agentic-core",
  "codex-arg0",
@@ -1643,7 +1644,7 @@ dependencies = [
 
 [[package]]
 name = "codex-stdio-to-uds"
-version = "0.0.0"
+version = "0.47.0"
 dependencies = [
  "anyhow",
  "assert_cmd",

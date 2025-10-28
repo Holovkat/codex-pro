@@ -1,3 +1,5 @@
+use chrono::DateTime;
+use chrono::Local;
 use codex_common::elapsed::format_duration;
 use codex_common::elapsed::format_elapsed;
 use codex_common::rate_limits::RateLimitWindowKind;
@@ -628,9 +630,9 @@ fn format_rate_limit_line(
     let mut summary = format!("{percent} of {} limit", kind.title());
 
     if let Some(resets_at) = window.resets_at.as_deref()
-        && let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(resets_at)
+        && let Ok(timestamp) = DateTime::parse_from_rfc3339(resets_at)
     {
-        let local_time = timestamp.with_timezone(&chrono::Local);
+        let local_time = timestamp.with_timezone(&Local);
         summary.push_str(" (resets ");
         summary.push_str(&format_reset_timestamp(local_time));
         summary.push(')');
@@ -639,8 +641,8 @@ fn format_rate_limit_line(
     Some(summary)
 }
 
-fn format_reset_timestamp(dt: chrono::DateTime<chrono::Local>) -> String {
-    let now = chrono::Local::now();
+fn format_reset_timestamp(dt: DateTime<Local>) -> String {
+    let now = Local::now();
     let time = dt.format("%H:%M").to_string();
     if dt.date_naive() == now.date_naive() {
         time
