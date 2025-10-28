@@ -1,9 +1,9 @@
 use assert_cmd::Command as AssertCommand;
+use assert_cmd::cargo::cargo_bin;
 use codex_core::RolloutRecorder;
 use codex_core::protocol::GitInfo;
 use core_test_support::fs_wait;
 use core_test_support::skip_if_no_network;
-use std::fs;
 use std::time::Duration;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -12,29 +12,6 @@ use wiremock::MockServer;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
-
-fn write_settings(
-    dir: &TempDir,
-    provider_id: &str,
-    base_url: &str,
-    wire_api: &str,
-    default_model: &str,
-    experimental_instructions: Option<&str>,
-) {
-    let settings_path = dir.path().join("settings.json");
-    let instructions_line = experimental_instructions
-        .map(|path| format!("  \"experimental_instructions_file\": \"{path}\",\n"))
-        .unwrap_or_default();
-    let contents = format!(
-        "{{\n{instructions_line}  \"model\": {{\n    \"provider\": \"{provider_id}\",\n    \"default\": \"{default_model}\"\n  }},\n  \"providers\": {{\n    \"custom\": {{\n      \"{provider_id}\": {{\n        \"name\": \"{provider_id}\",\n        \"base_url\": \"{base_url}\",\n        \"wire_api\": \"{wire_api}\",\n        \"default_model\": \"{default_model}\",\n        \"cached_models\": [\"{default_model}\"]\n      }}\n    }}\n  }}\n}}"
-    );
-    if let Err(err) = fs::write(&settings_path, contents) {
-        panic!(
-            "failed to write settings to {}: {err}",
-            settings_path.display()
-        );
-    }
-}
 
 /// Tests streaming chat completions through the CLI using a mock server.
 /// This test:
@@ -64,41 +41,22 @@ async fn chat_mode_stream_cli() {
         .await;
 
     let home = TempDir::new().unwrap();
-    write_settings(
-        &home,
-        "mock",
-        &format!("{}/v1", server.uri()),
-        "chat",
-        "glm-4.6",
-        None,
+    let provider_override = format!(
+        "model_providers.mock={{ name = \"mock\", base_url = \"{}/v1\", env_key = \"PATH\", wire_api = \"chat\" }}",
+        server.uri()
     );
-    let workspace = TempDir::new().unwrap();
-    write_settings(
-        &workspace,
-        "mock",
-        &format!("{}/v1", server.uri()),
-        "chat",
-        "glm-4.6",
-        None,
-    );
-    let mut cmd = AssertCommand::new("cargo");
-    cmd.arg("run")
-        .arg("-p")
-        .arg("codex-cli")
-        .arg("--bin")
-        .arg("codex-agentic")
-        .arg("--quiet")
-        .arg("--")
-        .arg("exec")
+    let bin = cargo_bin("codex");
+    let mut cmd = AssertCommand::new(bin);
+    cmd.arg("exec")
         .arg("--skip-git-repo-check")
+        .arg("-c")
+        .arg(&provider_override)
+        .arg("-c")
+        .arg("model_provider=\"mock\"")
         .arg("-C")
-        .arg(workspace.path())
+        .arg(env!("CARGO_MANIFEST_DIR"))
         .arg("hello?");
     cmd.env("CODEX_HOME", home.path())
-        .env(
-            "CODEX_SETTINGS_PATH",
-            workspace.path().join("settings.json"),
-        )
         .env("OPENAI_API_KEY", "dummy")
         .env("OPENAI_BASE_URL", format!("{}/v1", server.uri()));
 
@@ -159,46 +117,38 @@ async fn exec_cli_applies_experimental_instructions_file() {
     )
     .await;
 
+    // Create a temporary instructions file with a unique marker we can assert
+    // appears in the outbound request payload.
+    let custom = TempDir::new().unwrap();
     let marker = "cli-experimental-instructions-marker";
+    let custom_path = custom.path().join("instr.md");
+    std::fs::write(&custom_path, marker).unwrap();
+    let custom_path_str = custom_path.to_string_lossy().replace('\\', "/");
+
+    // Build a provider override that points at the mock server and instructs
+    // Codex to use the Responses API with the dummy env var.
+    let provider_override = format!(
+        "model_providers.mock={{ name = \"mock\", base_url = \"{}/v1\", env_key = \"PATH\", wire_api = \"responses\" }}",
+        server.uri()
+    );
 
     let home = TempDir::new().unwrap();
-    write_settings(
-        &home,
-        "mock",
-        &format!("{}/v1", server.uri()),
-        "responses",
-        "glm-4.6",
-        None,
-    );
-    let workspace = TempDir::new().unwrap();
-    write_settings(
-        &workspace,
-        "mock",
-        &format!("{}/v1", server.uri()),
-        "responses",
-        "glm-4.6",
-        None,
-    );
-    let mut cmd = AssertCommand::new("cargo");
-    cmd.arg("run")
-        .arg("-p")
-        .arg("codex-cli")
-        .arg("--bin")
-        .arg("codex-agentic")
-        .arg("--quiet")
-        .arg("--")
-        .arg("exec")
+    let bin = cargo_bin("codex");
+    let mut cmd = AssertCommand::new(bin);
+    cmd.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-c")
-        .arg(format!("base_instructions=\"{marker}\""))
+        .arg(&provider_override)
+        .arg("-c")
+        .arg("model_provider=\"mock\"")
+        .arg("-c")
+        .arg(format!(
+            "experimental_instructions_file=\"{custom_path_str}\""
+        ))
         .arg("-C")
-        .arg(workspace.path())
+        .arg(env!("CARGO_MANIFEST_DIR"))
         .arg("hello?\n");
     cmd.env("CODEX_HOME", home.path())
-        .env(
-            "CODEX_SETTINGS_PATH",
-            workspace.path().join("settings.json"),
-        )
         .env("OPENAI_API_KEY", "dummy")
         .env("OPENAI_BASE_URL", format!("{}/v1", server.uri()));
 
@@ -208,7 +158,19 @@ async fn exec_cli_applies_experimental_instructions_file() {
     println!("Stderr:\n{}", String::from_utf8_lossy(&output.stderr));
     assert!(output.status.success());
 
-    resp_mock.single_request();
+    // Inspect the captured request and verify our custom base instructions were
+    // included in the `instructions` field.
+    let request = resp_mock.single_request();
+    let body = request.body_json();
+    let instructions = body
+        .get("instructions")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        instructions.contains(marker),
+        "instructions did not contain custom marker; got: {instructions}"
+    );
 }
 
 /// Tests streaming responses through the CLI using a local SSE fixture file.
@@ -225,41 +187,14 @@ async fn responses_api_stream_cli() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cli_responses_fixture.sse");
 
     let home = TempDir::new().unwrap();
-    write_settings(
-        &home,
-        "mock",
-        "http://unused.local",
-        "responses",
-        "glm-4.6",
-        None,
-    );
-    let workspace = TempDir::new().unwrap();
-    write_settings(
-        &workspace,
-        "mock",
-        "http://unused.local",
-        "responses",
-        "glm-4.6",
-        None,
-    );
-    let mut cmd = AssertCommand::new("cargo");
-    cmd.arg("run")
-        .arg("-p")
-        .arg("codex-cli")
-        .arg("--bin")
-        .arg("codex-agentic")
-        .arg("--quiet")
-        .arg("--")
-        .arg("exec")
+    let bin = cargo_bin("codex");
+    let mut cmd = AssertCommand::new(bin);
+    cmd.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-C")
-        .arg(workspace.path())
+        .arg(env!("CARGO_MANIFEST_DIR"))
         .arg("hello?");
     cmd.env("CODEX_HOME", home.path())
-        .env(
-            "CODEX_SETTINGS_PATH",
-            workspace.path().join("settings.json"),
-        )
         .env("OPENAI_API_KEY", "dummy")
         .env("CODEX_RS_SSE_FIXTURE", fixture)
         .env("OPENAI_BASE_URL", "http://unused.local");
@@ -278,14 +213,6 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
 
     // 1. Temp home so we read/write isolated session files.
     let home = TempDir::new()?;
-    write_settings(
-        &home,
-        "mock",
-        "http://unused.local",
-        "responses",
-        "glm-4.6",
-        None,
-    );
 
     // 2. Unique marker we'll look for in the session log.
     let marker = format!("integration-test-{}", Uuid::new_v4());
@@ -295,35 +222,15 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
     let fixture =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cli_responses_fixture.sse");
 
-    // 4. Run the codex CLI through cargo (ensures the right bin is built) and invoke `exec`,
-    //    which is what records a session.
-    let workspace = TempDir::new()?;
-    write_settings(
-        &workspace,
-        "mock",
-        "http://unused.local",
-        "responses",
-        "glm-4.6",
-        None,
-    );
-    let mut cmd = AssertCommand::new("cargo");
-    cmd.arg("run")
-        .arg("-p")
-        .arg("codex-cli")
-        .arg("--bin")
-        .arg("codex-agentic")
-        .arg("--quiet")
-        .arg("--")
-        .arg("exec")
+    // 4. Run the codex CLI and invoke `exec`, which is what records a session.
+    let bin = cargo_bin("codex");
+    let mut cmd = AssertCommand::new(bin);
+    cmd.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-C")
-        .arg(workspace.path())
+        .arg(env!("CARGO_MANIFEST_DIR"))
         .arg(&prompt);
     cmd.env("CODEX_HOME", home.path())
-        .env(
-            "CODEX_SETTINGS_PATH",
-            workspace.path().join("settings.json"),
-        )
         .env("OPENAI_API_KEY", "dummy")
         .env("CODEX_RS_SSE_FIXTURE", &fixture)
         // Required for CLI arg parsing even though fixture short-circuits network usage.
@@ -437,13 +344,9 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
     // Second run: resume should update the existing file.
     let marker2 = format!("integration-resume-{}", Uuid::new_v4());
     let prompt2 = format!("echo {marker2}");
-    let mut cmd2 = AssertCommand::new("cargo");
-    cmd2.arg("run")
-        .arg("-p")
-        .arg("codex-cli")
-        .arg("--quiet")
-        .arg("--")
-        .arg("exec")
+    let bin2 = cargo_bin("codex");
+    let mut cmd2 = AssertCommand::new(bin2);
+    cmd2.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-C")
         .arg(env!("CARGO_MANIFEST_DIR"))
