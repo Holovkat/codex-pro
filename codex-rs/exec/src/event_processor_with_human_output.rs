@@ -627,38 +627,24 @@ fn format_rate_limit_line(
     let percent = format!("{:.0}%", window.used_percent);
     let mut summary = format!("{percent} of {} limit", kind.title());
 
-    if let Some(seconds) = window.resets_in_seconds
-        && seconds > 0
+    if let Some(resets_at) = window.resets_at.as_deref()
+        && let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(resets_at)
     {
-        summary.push_str(" (");
-        summary.push_str(&format_reset_duration(seconds));
+        let local_time = timestamp.with_timezone(&chrono::Local);
+        summary.push_str(" (resets ");
+        summary.push_str(&format_reset_timestamp(local_time));
         summary.push(')');
     }
 
     Some(summary)
 }
 
-fn format_reset_duration(seconds: u64) -> String {
-    const SECONDS_PER_MINUTE: u64 = 60;
-    const SECONDS_PER_HOUR: u64 = 60 * SECONDS_PER_MINUTE;
-
-    if seconds >= SECONDS_PER_HOUR {
-        let hours = seconds / SECONDS_PER_HOUR;
-        let minutes = (seconds % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE;
-        if minutes > 0 {
-            format!("resets in {hours}h {minutes}m")
-        } else {
-            format!("resets in {hours}h")
-        }
-    } else if seconds >= SECONDS_PER_MINUTE {
-        let minutes = seconds / SECONDS_PER_MINUTE;
-        let secs = seconds % SECONDS_PER_MINUTE;
-        if secs > 0 {
-            format!("resets in {minutes}m {secs}s")
-        } else {
-            format!("resets in {minutes}m")
-        }
+fn format_reset_timestamp(dt: chrono::DateTime<chrono::Local>) -> String {
+    let now = chrono::Local::now();
+    let time = dt.format("%H:%M").to_string();
+    if dt.date_naive() == now.date_naive() {
+        time
     } else {
-        format!("resets in {seconds}s")
+        format!("{time} on {}", dt.format("%-d %b"))
     }
 }

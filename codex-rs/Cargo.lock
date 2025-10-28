@@ -1130,7 +1130,7 @@ dependencies = [
 
 [[package]]
 name = "codex-async-utils"
-version = "0.0.0"
+version = "0.47.0"
 dependencies = [
  "async-trait",
  "pretty_assertions",

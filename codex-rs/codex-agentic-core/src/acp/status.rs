@@ -341,7 +341,7 @@ fn format_rate_limit_window(
     window: &RateLimitWindow,
     captured_at: Option<&DateTime<Local>>,
 ) -> String {
-    let resets = captured_at.and_then(|ts| format_reset(window.resets_in_seconds, ts));
+    let resets = captured_at.and_then(|ts| format_reset(window.resets_at.as_deref(), ts));
     let label = match window.window_minutes {
         Some(minutes) => format!("{label} ({})", describe_window(minutes)),
         None => label.to_string(),
@@ -396,10 +396,12 @@ fn render_status_limit_progress_bar(percent_used: f64) -> String {
     )
 }
 
-fn format_reset(resets_in_seconds: Option<u64>, captured_at: &DateTime<Local>) -> Option<String> {
-    let seconds = i64::try_from(resets_in_seconds?).ok()?;
-    let reset_time = captured_at.checked_add_signed(chrono::Duration::seconds(seconds))?;
-    Some(format_reset_timestamp(reset_time, *captured_at))
+fn format_reset(resets_at: Option<&str>, captured_at: &DateTime<Local>) -> Option<String> {
+    let reset_at = resets_at?;
+    let timestamp = chrono::DateTime::parse_from_rfc3339(reset_at)
+        .ok()?
+        .with_timezone(&Local);
+    Some(format_reset_timestamp(timestamp, *captured_at))
 }
 
 fn format_reset_timestamp(dt: DateTime<Local>, captured_at: DateTime<Local>) -> String {
