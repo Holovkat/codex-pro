@@ -464,7 +464,11 @@ async fn run_ratatui_app(
     // Initialize high-fidelity session event logging if enabled.
     session_log::maybe_init(&config);
 
-    let auth_manager = AuthManager::shared(config.codex_home.clone(), false);
+    let auth_manager = AuthManager::shared(
+        config.codex_home.clone(),
+        false,
+        config.cli_auth_credentials_store_mode,
+    );
     let login_status = get_login_status(&config);
     let should_show_windows_wsl_screen =
         cfg!(target_os = "windows") && !config.windows_wsl_setup_acknowledged;
@@ -617,7 +621,7 @@ fn get_login_status(config: &Config) -> LoginStatus {
         // Reading the OpenAI API key is an async operation because it may need
         // to refresh the token. Block on it.
         let codex_home = config.codex_home.clone();
-        match CodexAuth::from_auth_storage(&codex_home) {
+        match CodexAuth::from_auth_storage(&codex_home, config.cli_auth_credentials_store_mode) {
             Ok(Some(auth)) => LoginStatus::AuthMode(auth.mode),
             Ok(None) => LoginStatus::NotAuthenticated,
             Err(err) => {
