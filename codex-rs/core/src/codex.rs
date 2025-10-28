@@ -1235,12 +1235,6 @@ impl Session {
         }
     }
 
-    // todo (aibrahim): get rid of this method. we shouldn't deal with vec[resposne_item] and rather use ConversationHistory.
-    pub(crate) async fn history_snapshot(&self) -> Vec<ResponseItem> {
-        let mut state = self.state.lock().await;
-        state.history_snapshot()
-    }
-
     pub(crate) async fn clone_history(&self) -> ConversationHistory {
         let state = self.state.lock().await;
         state.clone_history()
@@ -1983,11 +1977,11 @@ pub(crate) async fn run_task(
             if !pending_input.is_empty() {
                 review_thread_history.record_items(&pending_input);
             }
-            review_thread_history.get_history()
+            review_thread_history.get_history_for_prompt()
         } else {
             sess.record_conversation_items(&turn_context, &pending_input)
                 .await;
-            sess.history_snapshot().await
+            sess.clone_history().await.get_history_for_prompt()
         };
 
         if !is_review_mode {
@@ -2152,7 +2146,10 @@ fn parse_review_output_event(text: &str) -> ReviewOutputEvent {
 fn filter_model_visible_history(input: Vec<ResponseItem>) -> Vec<ResponseItem> {
     input
         .into_iter()
-        .filter(|item| !matches!(item, ResponseItem::GhostSnapshot { .. }))
+        .filter(|item| {
+            !matches!(item, ResponseItem::GhostSnapshot { .. })
+                && !matches!(item, ResponseItem::Reasoning { .. })
+        })
         .collect()
 }
 
@@ -2168,7 +2165,8 @@ pub(crate) fn latest_user_message_text(items: &[ResponseItem]) -> Option<String>
                     _ => None,
                 })
                 .collect::<Vec<String>>()
-                .join("\n");
+                .join("
+");
             if combined.trim().is_empty() {
                 None
             } else {
@@ -2182,7 +2180,7 @@ pub(crate) fn latest_user_message_text(items: &[ResponseItem]) -> Option<String>
 fn format_memory_hits_message(min_confidence: f32, hits: &[MemoryHit]) -> String {
     let mut lines = Vec::with_capacity(hits.len().saturating_add(1));
     lines.push(format!(
-        "Relevant memories (confidence ≥ {:.0}%). Use memory_fetch(\"<memory-id>\") for details:",
+        "Relevant memories (confidence ≥ {:.0}%). Use memory_fetch("<memory-id>") for details:",
         min_confidence * 100.0
     ));
     for hit in hits {
@@ -2195,10 +2193,11 @@ fn format_memory_hits_message(min_confidence: f32, hits: &[MemoryHit]) -> String
             hit.score
         ));
     }
-    lines.join("\n")
+    lines.join("
+")
 }
 
-async fn run_turn(
+ async fn run_turn(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
     turn_diff_tracker: SharedTurnDiffTracker,
@@ -2746,7 +2745,9 @@ mod tests {
             },
         )));
 
-        let actual = tokio_test::block_on(async { session.state.lock().await.history_snapshot() });
+        let actual = tokio_test::block_on(async {
+            session.state.lock().await.clone_history().get_history()
+        });
         assert_eq!(expected, actual);
     }
 
@@ -2757,7 +2758,9 @@ mod tests {
 
         tokio_test::block_on(session.record_initial_history(InitialHistory::Forked(rollout_items)));
 
-        let actual = tokio_test::block_on(async { session.state.lock().await.history_snapshot() });
+        let actual = tokio_test::block_on(async {
+            session.state.lock().await.clone_history().get_history()
+        });
         assert_eq!(expected, actual);
     }
 
@@ -3161,7 +3164,7 @@ mod tests {
             }
         }
 
-        let history = sess.history_snapshot().await;
+        let history = sess.clone_history().await.get_history();
         let found = history.iter().any(|item| match item {
             ResponseItem::Message { role, content, .. } if role == "user" => {
                 content.iter().any(|ci| match ci {
