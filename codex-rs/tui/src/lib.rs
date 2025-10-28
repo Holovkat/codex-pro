@@ -640,6 +640,11 @@ fn determine_repo_trust_state(
     sandbox_mode_override: Option<SandboxMode>,
     config_profile_override: Option<String>,
 ) -> std::io::Result<bool> {
+    if cfg!(target_os = "windows") {
+        // Native Windows cannot enforce sandboxed write access without WSL; skip the trust prompt entirely.
+        return Ok(false);
+    }
+
     let config_profile = config_toml.get_config_profile(config_profile_override)?;
 
     if approval_policy_overide.is_some() || sandbox_mode_override.is_some() {
@@ -664,6 +669,14 @@ fn determine_repo_trust_state(
         // if none of the above conditions are met, show the trust screen
         Ok(true)
     }
+}
+    }
+    if config.did_user_set_custom_approval_policy_or_sandbox_mode {
+        // Respect explicit approval/sandbox overrides made by the user.
+        return false;
+    }
+    // otherwise, skip iff the active project is trusted
+    !config.active_project.is_trusted()
 }
 
 fn should_show_onboarding(
@@ -691,4 +704,46 @@ fn should_show_login_screen(login_status: LoginStatus, config: &Config) -> bool 
     }
 
     login_status == LoginStatus::NotAuthenticated
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_core::config::ConfigOverrides;
+    use codex_core::config::ConfigToml;
+    use codex_core::config::ProjectConfig;
+    use tempfile::TempDir;
+
+    #[test]
+    fn windows_skips_trust_prompt() -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mut config = Config::load_from_base_config_with_overrides(
+            ConfigToml::default(),
+            ConfigOverrides::default(),
+            temp_dir.path().to_path_buf(),
+        )?;
+        config.did_user_set_custom_approval_policy_or_sandbox_mode = false;
+        config.active_project = ProjectConfig { trust_level: None };
+
+        let config_toml = ConfigToml::default();
+        let should_show = determine_repo_trust_state(
+            &mut config,
+            &config_toml,
+            None,
+            None,
+            None,
+        )?;
+        if cfg!(target_os = "windows") {
+            assert!(
+                !should_show,
+                "Windows trust prompt should always be skipped on native Windows"
+            );
+        } else {
+            assert!(
+                should_show,
+                "Non-Windows should still show trust prompt when project is untrusted"
+            );
+        }
+        Ok(())
+    }
 }
