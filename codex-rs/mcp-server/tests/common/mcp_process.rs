@@ -145,13 +145,12 @@ impl McpProcess {
 
         let initialized = self.read_jsonrpc_message().await?;
         let os_info = os_info::get();
+        let os_type = os_info.os_type();
+        let os_version = os_info.version();
+        let os_arch = os_info.architecture().unwrap_or("unknown");
+        let terminal_user_agent = codex_core::terminal::user_agent();
         let user_agent = format!(
-            "codex_cli_rs/{} ({} {}; {}) {} (elicitation test; {})",
-            CLI_VERSION,
-            os_info.os_type(),
-            os_info.version(),
-            os_info.architecture().unwrap_or("unknown"),
-            codex_core::terminal::user_agent()
+            "codex_cli_rs/{CLI_VERSION} ({os_type} {os_version}; {os_arch}) {terminal_user_agent} (elicitation test)"
         );
         let expected = JSONRPCMessage::Response(JSONRPCResponse {
             jsonrpc: JSONRPC_VERSION.into(),
