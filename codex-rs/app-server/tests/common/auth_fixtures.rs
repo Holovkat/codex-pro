@@ -125,6 +125,7 @@ pub fn write_chatgpt_auth(codex_home: &Path, fixture: ChatGptAuthFixture) -> Res
         openai_api_key: None,
         tokens: Some(tokens),
         last_refresh,
+        custom_providers: None,
     };
 
     write_auth_json(&get_auth_file(codex_home), &auth).context("write auth.json")

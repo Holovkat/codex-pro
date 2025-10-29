@@ -323,6 +323,7 @@ pub fn custom_provider_model_info(provider_id: &str, custom: &CustomProvider) ->
         requires_openai_auth: false,
         provider_kind: custom.provider_kind,
         reasoning_controls: custom.reasoning_controls.clone(),
+        experimental_bearer_token: None,
     };
 
     info.base_url = match custom.provider_kind {

@@ -70,6 +70,12 @@ impl ChatComposerHistory {
         self.local_history.push(text.to_string());
     }
 
+    /// Reset history navigation state so subsequent Up/Down presses restart browsing.
+    pub fn reset_navigation(&mut self) {
+        self.history_cursor = None;
+        self.last_history_text = None;
+    }
+
     /// Should Up/Down key presses be interpreted as history navigation given
     /// the current content and cursor position of `textarea`?
     pub fn should_handle_navigation(&self, text: &str, cursor: usize) -> bool {
