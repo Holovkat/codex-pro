@@ -103,6 +103,11 @@ impl StatusIndicatorWidget {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn header(&self) -> &str {
+        &self.header
+    }
+
     /// Replace the queued messages displayed beneath the header.
     pub(crate) fn set_queued_messages(&mut self, queued: Vec<String>) {
         self.queued_messages = queued;
@@ -279,6 +284,11 @@ mod tests {
         terminal
             .draw(|f| w.render_ref(f.area(), f.buffer_mut()))
             .expect("draw");
+        #[cfg(target_os = "macos")]
+        insta::with_settings!({ snapshot_suffix => "macos" }, {
+            insta::assert_snapshot!(terminal.backend());
+        });
+        #[cfg(not(target_os = "macos"))]
         insta::assert_snapshot!(terminal.backend());
     }
 

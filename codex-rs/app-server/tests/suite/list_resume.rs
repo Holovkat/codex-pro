@@ -19,6 +19,8 @@ use tempfile::TempDir;
 use tokio::time::timeout;
 use uuid::Uuid;
 
+const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -173,7 +175,7 @@ fn create_fake_rollout(codex_home: &Path, filename_ts: &str, meta_rfc3339: &str,
                 "timestamp": meta_rfc3339,
                 "cwd": "/",
                 "originator": "codex",
-                "cli_version": "0.0.0",
+                "cli_version": CLI_VERSION,
                 "instructions": null
             }
         })

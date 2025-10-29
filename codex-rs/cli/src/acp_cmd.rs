@@ -14,7 +14,6 @@ use codex_agentic_core::init_global_prompt;
 use codex_agentic_core::init_global_settings;
 use codex_agentic_core::merge_custom_providers_into_config;
 use codex_agentic_core::provider::ResolveModelProviderArgs;
-use codex_agentic_core::provider::plan_tool_supported;
 use codex_agentic_core::provider::resolve_model_provider;
 use codex_agentic_core::settings::Acp as AcpSettings;
 use codex_agentic_core::settings::Model as ModelSettings;
@@ -92,7 +91,6 @@ pub async fn run(
     let mut config_overrides = ConfigOverrides {
         model: resolution.model.clone(),
         model_provider: resolution.provider_override.clone(),
-        include_plan_tool: Some(resolution.include_plan_tool),
         ..ConfigOverrides::default()
     };
 
@@ -139,7 +137,6 @@ pub async fn run(
             );
         }
     }
-    config.include_plan_tool = resolution.include_plan_tool;
 
     refresh_model_metadata(&mut config);
     codex_agentic_core::provider::sanitize_reasoning_overrides(&mut config);
@@ -227,21 +224,14 @@ fn refresh_model_metadata(config: &mut Config) {
     config.model_family = family;
 
     if let Some(info) = get_model_info(&config.model_family) {
-        config.model_context_window = Some(info.context_window);
-        config.model_max_output_tokens = Some(info.max_output_tokens);
+        config.model_context_window = Some(info.context_window());
+        config.model_max_output_tokens = Some(info.max_output_tokens());
         config.model_auto_compact_token_limit = info.auto_compact_token_limit;
     } else {
         config.model_context_window = None;
         config.model_max_output_tokens = None;
         config.model_auto_compact_token_limit = None;
     }
-
-    let model_slug = if config.model.is_empty() {
-        None
-    } else {
-        Some(config.model.as_str())
-    };
-    config.include_plan_tool = plan_tool_supported(config.model_provider_id.as_str(), model_slug);
 }
 
 fn build_status_summary(config: &Config, ctx: &CommandContext) -> String {

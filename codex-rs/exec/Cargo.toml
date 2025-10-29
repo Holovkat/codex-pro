@@ -27,6 +27,7 @@ codex-agentic-core = { path = "../codex-agentic-core" }
 codex-core = { workspace = true }
 codex-ollama = { workspace = true }
 codex-protocol = { workspace = true }
+chrono = { workspace = true }
 opentelemetry-appender-tracing = { workspace = true }
 owo-colors = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

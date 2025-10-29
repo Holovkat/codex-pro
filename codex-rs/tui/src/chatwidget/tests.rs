@@ -4,6 +4,7 @@ use crate::app_event_sender::AppEventSender;
 use crate::test_backend::VT100Backend;
 use crate::tui::FrameRequester;
 use assert_matches::assert_matches;
+use codex_common::approval_presets::builtin_approval_presets;
 use codex_core::AuthManager;
 use codex_core::CodexAuth;
 use codex_core::config::Config;
@@ -22,7 +23,6 @@ use codex_core::protocol::ExecCommandBeginEvent;
 use codex_core::protocol::ExecCommandEndEvent;
 use codex_core::protocol::ExitedReviewModeEvent;
 use codex_core::protocol::FileChange;
-use codex_core::protocol::InputMessageKind;
 use codex_core::protocol::Op;
 use codex_core::protocol::PatchApplyBeginEvent;
 use codex_core::protocol::PatchApplyEndEvent;
@@ -36,7 +36,6 @@ use codex_core::protocol::TaskCompleteEvent;
 use codex_core::protocol::TaskStartedEvent;
 use codex_core::protocol::ViewImageToolCallEvent;
 use codex_protocol::ConversationId;
-use codex_protocol::parse_command::ParsedCommand;
 use codex_protocol::plan_tool::PlanItemArg;
 use codex_protocol::plan_tool::StepStatus;
 use codex_protocol::plan_tool::UpdatePlanArgs;
@@ -50,6 +49,7 @@ use std::io::BufRead;
 use std::io::BufReader;
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
+use tempfile::tempdir;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::unbounded_channel;
 
@@ -71,34 +71,48 @@ fn upgrade_event_payload_for_tests(mut payload: serde_json::Value) -> serde_json
         && let Some(m) = msg.as_object_mut()
     {
         let ty = m.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        if ty == "exec_command_end" && !m.contains_key("formatted_output") {
+        if ty == "exec_command_end" {
             let stdout = m.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
             let stderr = m.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
-            let formatted = if stderr.is_empty() {
+            let aggregated = if stderr.is_empty() {
                 stdout.to_string()
             } else {
                 format!("{stdout}{stderr}")
             };
-            m.insert(
-                "formatted_output".to_string(),
-                serde_json::Value::String(formatted),
-            );
-        } else if (ty == "exec_command_begin" || ty == "exec_approval_request")
-            && !m.contains_key("parsed_cmd")
-        {
-            let cmd_vec: Vec<String> = m
-                .get("command")
-                .and_then(|v| v.as_array())
-                .into_iter()
-                .flatten()
-                .filter_map(|v| v.as_str().map(ToString::to_string))
-                .collect();
-            let parsed_cmd: Vec<ParsedCommand> = codex_core::parse_command::parse_command(&cmd_vec)
-                .into_iter()
-                .collect();
-            let value = serde_json::to_value(parsed_cmd)
-                .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
-            m.insert("parsed_cmd".to_string(), value);
+            if !m.contains_key("formatted_output") {
+                m.insert(
+                    "formatted_output".to_string(),
+                    serde_json::Value::String(aggregated.clone()),
+                );
+            }
+            if !m.contains_key("aggregated_output") {
+                m.insert(
+                    "aggregated_output".to_string(),
+                    serde_json::Value::String(aggregated),
+                );
+            }
+        } else if ty == "exec_command_begin" {
+            let needs_parsed_cmd = m
+                .get("parsed_cmd")
+                .map(|value| !matches!(value, serde_json::Value::Array(_)))
+                .unwrap_or(true);
+            if needs_parsed_cmd {
+                m.insert(
+                    "parsed_cmd".to_string(),
+                    serde_json::Value::Array(Vec::new()),
+                );
+            }
+        } else if ty == "exec_approval_request" {
+            let needs_parsed_cmd = m
+                .get("parsed_cmd")
+                .map(|value| !matches!(value, serde_json::Value::Array(_)))
+                .unwrap_or(true);
+            if needs_parsed_cmd {
+                m.insert(
+                    "parsed_cmd".to_string(),
+                    serde_json::Value::Array(Vec::new()),
+                );
+            }
         }
     }
     payload
@@ -119,7 +133,6 @@ fn resumed_initial_messages_render_history() {
         initial_messages: Some(vec![
             EventMsg::UserMessage(UserMessageEvent {
                 message: "hello from user".to_string(),
-                kind: Some(InputMessageKind::Plain),
                 images: None,
             }),
             EventMsg::AgentMessage(AgentMessageEvent {
@@ -249,8 +262,8 @@ async fn helpers_are_available_and_do_not_panic() {
         initial_prompt: None,
         initial_images: Vec::new(),
         enhanced_keys_supported: false,
-        feedback: codex_feedback::CodexFeedback::new(),
         auth_manager,
+        feedback: codex_feedback::CodexFeedback::new(),
     };
     let mut w = ChatWidget::new(init, conversation_manager);
     // Basic construction sanity.
@@ -294,6 +307,8 @@ fn make_chatwidget_manual() -> (
         interrupts: InterruptManager::new(),
         reasoning_buffer: String::new(),
         full_reasoning_buffer: String::new(),
+        current_status_header: String::from("Working"),
+        retry_status_header: None,
         conversation_id: None,
         frame_requester: FrameRequester::test_dummy(),
         show_welcome_banner: true,
@@ -306,6 +321,7 @@ fn make_chatwidget_manual() -> (
         needs_final_message_separator: false,
         last_rendered_width: std::cell::Cell::new(None),
         feedback: codex_feedback::CodexFeedback::new(),
+        current_rollout_path: None,
     };
     (widget, rx, op_rx)
 }
@@ -409,7 +425,8 @@ fn exec_approval_emits_proposed_command_and_decision_history() {
         reason: Some(
             "this is a test reason such as one that would be produced by the model".into(),
         ),
-        parsed_cmd: Vec::new(),
+        risk: None,
+        parsed_cmd: vec![],
     };
     chat.handle_codex_event(Event {
         id: "sub-short".into(),
@@ -451,7 +468,8 @@ fn exec_approval_decision_truncates_multiline_and_long_commands() {
         reason: Some(
             "this is a test reason such as one that would be produced by the model".into(),
         ),
-        parsed_cmd: Vec::new(),
+        risk: None,
+        parsed_cmd: vec![],
     };
     chat.handle_codex_event(Event {
         id: "sub-multi".into(),
@@ -499,7 +517,8 @@ fn exec_approval_decision_truncates_multiline_and_long_commands() {
         command: vec!["bash".into(), "-lc".into(), long],
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         reason: None,
-        parsed_cmd: Vec::new(),
+        risk: None,
+        parsed_cmd: vec![],
     };
     chat.handle_codex_event(Event {
         id: "sub-long".into(),
@@ -525,9 +544,7 @@ fn begin_exec(chat: &mut ChatWidget, call_id: &str, raw_cmd: &str) {
     // Build the full command vec and parse it using core's parser,
     // then convert to protocol variants for the event payload.
     let command = vec!["bash".to_string(), "-lc".to_string(), raw_cmd.to_string()];
-    let parsed_cmd: Vec<ParsedCommand> = codex_core::parse_command::parse_command(&command)
-        .into_iter()
-        .collect();
+    let parsed_cmd: Vec<ParsedCommand> = codex_core::parse_command::parse_command(&command);
     chat.handle_codex_event(Event {
         id: call_id.to_string(),
         msg: EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
@@ -696,6 +713,52 @@ fn streaming_final_answer_keeps_task_running_state() {
 }
 
 #[test]
+fn ctrl_c_shutdown_ignores_caps_lock() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual();
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::CONTROL));
+
+    match op_rx.try_recv() {
+        Ok(Op::Shutdown) => {}
+        other => panic!("expected Op::Shutdown, got {other:?}"),
+    }
+}
+
+#[test]
+fn ctrl_c_cleared_prompt_is_recoverable_via_history() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual();
+
+    chat.bottom_pane.insert_str("draft message ");
+    chat.bottom_pane
+        .attach_image(PathBuf::from("/tmp/preview.png"), 24, 42, "png");
+    let placeholder = "[image 24x42 png]";
+    assert!(
+        chat.bottom_pane.composer_text().ends_with(placeholder),
+        "expected placeholder {placeholder:?} in composer text"
+    );
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(chat.bottom_pane.composer_text().is_empty());
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+    assert!(chat.bottom_pane.ctrl_c_quit_hint_visible());
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    let restored_text = chat.bottom_pane.composer_text();
+    assert!(
+        restored_text.ends_with(placeholder),
+        "expected placeholder {placeholder:?} after history recall"
+    );
+    assert!(restored_text.starts_with("draft message "));
+    assert!(!chat.bottom_pane.ctrl_c_quit_hint_visible());
+
+    let images = chat.bottom_pane.take_recent_submission_images();
+    assert!(
+        images.is_empty(),
+        "attachments are not preserved in history recall"
+    );
+}
+
+#[test]
 fn exec_history_cell_shows_working_then_completed() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
 
@@ -774,6 +837,38 @@ fn review_popup_custom_prompt_action_sends_event() {
         }
     }
     assert!(found, "expected OpenReviewCustomPrompt event to be sent");
+}
+
+#[test]
+fn slash_init_skips_when_project_doc_exists() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
+    let tempdir = tempdir().unwrap();
+    let existing_path = tempdir.path().join(DEFAULT_PROJECT_DOC_FILENAME);
+    std::fs::write(&existing_path, "existing instructions").unwrap();
+    chat.config.cwd = tempdir.path().to_path_buf();
+
+    chat.dispatch_command(SlashCommand::Init, None);
+
+    match op_rx.try_recv() {
+        Err(TryRecvError::Empty) => {}
+        other => panic!("expected no Codex op to be sent, got {other:?}"),
+    }
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(cells.len(), 1, "expected one info message");
+    let rendered = lines_to_single_string(&cells[0]);
+    assert!(
+        rendered.contains(DEFAULT_PROJECT_DOC_FILENAME),
+        "info message should mention the existing file: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("Skipping /init"),
+        "info message should explain why /init was skipped: {rendered:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(existing_path).unwrap(),
+        "existing instructions"
+    );
 }
 
 /// The commit picker shows only commit subjects (no timestamps).
@@ -926,6 +1021,37 @@ fn interrupt_exec_marks_failed_snapshot() {
     assert_snapshot!("interrupt_exec_marks_failed", exec_blob);
 }
 
+// Snapshot test: after an interrupted turn, a gentle error message is inserted
+// suggesting the user to tell the model what to do differently and to use /feedback.
+#[test]
+fn interrupted_turn_error_message_snapshot() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
+
+    // Simulate an in-progress task so the widget is in a running state.
+    chat.handle_codex_event(Event {
+        id: "task-1".into(),
+        msg: EventMsg::TaskStarted(TaskStartedEvent {
+            model_context_window: None,
+        }),
+    });
+
+    // Abort the turn (like pressing Esc) and drain inserted history.
+    chat.handle_codex_event(Event {
+        id: "task-1".into(),
+        msg: EventMsg::TurnAborted(codex_core::protocol::TurnAbortedEvent {
+            reason: TurnAbortReason::Interrupted,
+        }),
+    });
+
+    let cells = drain_insert_history(&mut rx);
+    assert!(
+        !cells.is_empty(),
+        "expected error message to be inserted after interruption"
+    );
+    let last = lines_to_single_string(cells.last().unwrap());
+    assert_snapshot!("interrupted_turn_error_message", last);
+}
+
 /// Opening custom prompt from the review popup, pressing Esc returns to the
 /// parent popup, pressing Esc again dismisses all panels (back to normal mode).
 #[test]
@@ -1062,24 +1188,67 @@ fn model_selection_popup_snapshot() {
 }
 
 #[test]
+fn approvals_selection_popup_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
+
+    chat.config.notices.hide_full_access_warning = None;
+    chat.open_approvals_popup();
+
+    let popup = render_bottom_popup(&chat, 80);
+    assert_snapshot!("approvals_selection_popup", popup);
+}
+
+#[test]
+fn full_access_confirmation_popup_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
+
+    let preset = builtin_approval_presets()
+        .into_iter()
+        .find(|preset| preset.id == "full-access")
+        .expect("full access preset");
+    chat.open_full_access_confirmation(preset);
+
+    let popup = render_bottom_popup(&chat, 80);
+    assert_snapshot!("full_access_confirmation_popup", popup);
+}
+
+#[test]
 fn model_reasoning_selection_popup_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
 
     chat.config.model = "gpt-5-codex".to_string();
     chat.config.model_reasoning_effort = Some(ReasoningEffortConfig::High);
 
-    let presets = builtin_model_presets(None)
+    let preset = builtin_model_presets(None)
         .into_iter()
-        .filter(|preset| preset.model == "gpt-5-codex")
-        .collect::<Vec<_>>();
-    chat.open_reasoning_popup(
-        "gpt-5-codex".to_string(),
-        DEFAULT_OPENAI_PROVIDER_ID.to_string(),
-        presets,
-    );
+        .find(|preset| preset.model == "gpt-5-codex")
+        .expect("gpt-5-codex preset");
+    chat.open_reasoning_popup(preset);
 
     let popup = render_bottom_popup(&chat, 80);
     assert_snapshot!("model_reasoning_selection_popup", popup);
+}
+
+#[test]
+fn feedback_selection_popup_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
+
+    // Open the feedback category selection popup via slash command.
+    chat.dispatch_command(SlashCommand::Feedback, None);
+
+    let popup = render_bottom_popup(&chat, 80);
+    assert_snapshot!("feedback_selection_popup", popup);
+}
+
+#[test]
+fn feedback_upload_consent_popup_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
+
+    // Open the consent popup directly for a chosen category.
+    chat.open_feedback_consent(crate::app_event::FeedbackCategory::Bug);
+
+    let popup = render_bottom_popup(&chat, 80);
+    assert_snapshot!("feedback_upload_consent_popup", popup);
 }
 
 #[test]
@@ -1091,13 +1260,9 @@ fn reasoning_popup_escape_returns_to_model_popup() {
 
     let presets = builtin_model_presets(None)
         .into_iter()
-        .filter(|preset| preset.model == "gpt-5-codex")
-        .collect::<Vec<_>>();
-    chat.open_reasoning_popup(
-        "gpt-5-codex".to_string(),
-        DEFAULT_OPENAI_PROVIDER_ID.to_string(),
-        presets,
-    );
+        .find(|preset| preset.model == "gpt-5-codex")
+        .expect("gpt-5-codex preset");
+    chat.open_reasoning_popup(presets);
 
     let before_escape = render_bottom_popup(&chat, 80);
     assert!(before_escape.contains("Select Reasoning Level"));
@@ -1204,9 +1369,29 @@ async fn binary_size_transcript_snapshot() {
         match kind {
             "codex_event" => {
                 if let Some(payload) = v.get("payload") {
-                    let ev: Event =
-                        serde_json::from_value(upgrade_event_payload_for_tests(payload.clone()))
-                            .expect("parse");
+                    let mut upgraded = upgrade_event_payload_for_tests(payload.clone());
+                    if let Some(msg) = upgraded
+                        .get_mut("msg")
+                        .and_then(serde_json::Value::as_object_mut)
+                    {
+                        let is_exec_begin = msg
+                            .get("type")
+                            .and_then(serde_json::Value::as_str)
+                            .map(|ty| ty == "exec_command_begin")
+                            .unwrap_or(false);
+                        if is_exec_begin
+                            && !matches!(msg.get("parsed_cmd"), Some(serde_json::Value::Array(_)))
+                        {
+                            msg.insert(
+                                "parsed_cmd".to_string(),
+                                serde_json::Value::Array(Vec::new()),
+                            );
+                        }
+                    }
+                    let ev: Event = match serde_json::from_value(upgraded.clone()) {
+                        Ok(ev) => ev,
+                        Err(err) => panic!("failed to parse payload {upgraded:?}: {err}"),
+                    };
                     let ev = match ev {
                         Event {
                             msg: EventMsg::ExecCommandBegin(e),
@@ -1220,7 +1405,7 @@ async fn binary_size_transcript_snapshot() {
                                     call_id: e.call_id.clone(),
                                     command: e.command,
                                     cwd: e.cwd,
-                                    parsed_cmd: parsed_cmd.into_iter().collect(),
+                                    parsed_cmd,
                                 }),
                             }
                         }
@@ -1335,7 +1520,8 @@ fn approval_modal_exec_snapshot() {
         reason: Some(
             "this is a test reason such as one that would be produced by the model".into(),
         ),
-        parsed_cmd: Vec::new(),
+        risk: None,
+        parsed_cmd: vec![],
     };
     chat.handle_codex_event(Event {
         id: "sub-approve".into(),
@@ -1379,7 +1565,8 @@ fn approval_modal_exec_without_reason_snapshot() {
         command: vec!["bash".into(), "-lc".into(), "echo hello world".into()],
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         reason: None,
-        parsed_cmd: Vec::new(),
+        risk: None,
+        parsed_cmd: vec![],
     };
     chat.handle_codex_event(Event {
         id: "sub-approve-noreason".into(),
@@ -1585,11 +1772,12 @@ fn status_widget_and_approval_modal_snapshot() {
     let ev = ExecApprovalRequestEvent {
         call_id: "call-approve-exec".into(),
         command: vec!["echo".into(), "hello world".into()],
-        cwd: std::path::PathBuf::from("/tmp"),
+        cwd: PathBuf::from("/tmp"),
         reason: Some(
             "this is a test reason such as one that would be produced by the model".into(),
         ),
-        parsed_cmd: Vec::new(),
+        risk: None,
+        parsed_cmd: vec![],
     };
     chat.handle_codex_event(Event {
         id: "sub-approve-exec".into(),
@@ -2073,9 +2261,10 @@ fn plan_update_renders_history_cell() {
 }
 
 #[test]
-fn stream_error_is_rendered_to_history() {
+fn stream_error_updates_status_indicator() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
-    let msg = "stream error: stream disconnected before completion: idle timeout waiting for SSE; retrying 1/5 in 211ms…";
+    chat.bottom_pane.set_task_running(true);
+    let msg = "Re-connecting... 2/5";
     chat.handle_codex_event(Event {
         id: "sub-1".into(),
         msg: EventMsg::StreamError(StreamErrorEvent {
@@ -2084,11 +2273,22 @@ fn stream_error_is_rendered_to_history() {
     });
 
     let cells = drain_insert_history(&mut rx);
-    assert!(!cells.is_empty(), "expected a history cell for StreamError");
-    let blob = lines_to_single_string(cells.last().unwrap());
-    assert!(blob.contains('⚠'));
-    assert!(blob.contains("stream error:"));
-    assert!(blob.contains("idle timeout waiting for SSE"));
+    let stream_error_cell = cells
+        .iter()
+        .find_map(|lines| {
+            let blob = lines_to_single_string(lines);
+            blob.contains(msg).then_some(blob)
+        })
+        .expect("expected stream error history cell with reconnect message");
+    let status = chat
+        .bottom_pane
+        .status_widget()
+        .expect("status indicator should be visible");
+    assert_eq!(status.header(), msg);
+    assert!(
+        stream_error_cell.contains("Re-connecting"),
+        "expected stream error copy in history cell"
+    );
 }
 
 #[test]
@@ -2259,7 +2459,7 @@ fn chatwidget_exec_and_status_layout_vt100_snapshot() {
                 ParsedCommand::Read {
                     name: "diff_render.rs".into(),
                     cmd: "cat diff_render.rs".into(),
-                    path: PathBuf::from("diff_render.rs"),
+                    path: "diff_render.rs".into(),
                 },
             ],
         }),

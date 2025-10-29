@@ -60,9 +60,9 @@ pub struct TurnFailedEvent {
 pub struct RateLimitWindowUsage {
     pub used_percent: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub window_minutes: Option<u64>,
+    pub window_minutes: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub resets_in_seconds: Option<u64>,
+    pub resets_at: Option<i64>,
 }
 
 /// Snapshot of primary/secondary rate limit usage.
@@ -78,11 +78,11 @@ pub struct RateLimitUsage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, Default)]
 pub struct Usage {
     /// The number of input tokens used during the turn.
-    pub input_tokens: u64,
+    pub input_tokens: i64,
     /// The number of cached input tokens used during the turn.
-    pub cached_input_tokens: u64,
+    pub cached_input_tokens: i64,
     /// The number of output tokens used during the turn.
-    pub output_tokens: u64,
+    pub output_tokens: i64,
     /// Latest rate limit snapshot observed for the session.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limits: Option<RateLimitUsage>,
@@ -93,7 +93,7 @@ impl From<&RateLimitWindow> for RateLimitWindowUsage {
         Self {
             used_percent: window.used_percent,
             window_minutes: window.window_minutes,
-            resets_in_seconds: window.resets_in_seconds,
+            resets_at: window.resets_at,
         }
     }
 }

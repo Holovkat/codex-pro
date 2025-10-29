@@ -4,6 +4,7 @@
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 #![deny(clippy::disallowed_methods)]
 use crate::chatwidget::refresh_model_metadata;
+use additional_dirs::add_dir_warning_message;
 use app::App;
 pub use app::AppExitInfo;
 use codex_agentic_core::apply_overlay_to_config;
@@ -19,6 +20,7 @@ use codex_core::AuthManager;
 use codex_core::CodexAuth;
 use codex_core::INTERACTIVE_SESSION_SOURCES;
 use codex_core::RolloutRecorder;
+use codex_core::auth::enforce_login_restrictions;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::ConfigToml;
@@ -38,6 +40,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::prelude::*;
 
+mod additional_dirs;
 mod app;
 mod app_backtrack;
 mod app_event;
@@ -45,7 +48,6 @@ mod app_event_sender;
 mod ascii_animation;
 mod bottom_pane;
 mod chatwidget;
-mod citation_regex;
 mod cli;
 mod clipboard_paste;
 mod color;
@@ -90,8 +92,8 @@ mod wrapping;
 #[cfg(test)]
 pub mod test_backend;
 
-#[cfg(not(debug_assertions))]
-mod updates;
+pub mod updates;
+pub use updates::UpdateAction;
 
 use crate::onboarding::TrustDirectorySelection;
 use crate::onboarding::WSL_INSTRUCTIONS;
@@ -136,7 +138,6 @@ pub async fn run_main(
             .with_force_oss(cli.oss),
     );
     let oss_active = resolution.oss_active;
-
     if (cli.model.is_some() || cli.oss)
         && let Some(model) = resolution.model.clone()
     {
@@ -154,6 +155,7 @@ pub async fn run_main(
 
     // canonicalize the cwd
     let cwd = cli.cwd.clone().map(|p| p.canonicalize().unwrap_or(p));
+    let additional_dirs = cli.add_dir.clone();
 
     let custom_provider_selected = resolution
         .provider_override
@@ -171,11 +173,12 @@ pub async fn run_main(
         config_profile: cli.config_profile.clone(),
         codex_linux_sandbox_exe,
         base_instructions: Some(base_prompt.clone()),
-        include_plan_tool: Some(resolution.include_plan_tool),
         include_apply_patch_tool: None,
         include_view_image_tool: None,
         show_raw_agent_reasoning: oss_active.then_some(true),
         tools_web_search_request: cli.web_search.then_some(true),
+        experimental_sandbox_command_assessment: None,
+        additional_writable_roots: additional_dirs,
     };
 
     if custom_provider_selected.is_none() && resolution.provider_override.is_none() {
@@ -251,9 +254,6 @@ pub async fn run_main(
     };
 
     let cli_profile_override = cli.config_profile.clone();
-    let active_profile = cli_profile_override
-        .clone()
-        .or_else(|| config_toml.profile.clone());
 
     let should_show_trust_screen = determine_repo_trust_state(
         &mut config,
@@ -263,6 +263,21 @@ pub async fn run_main(
         cli_profile_override,
     )?;
 
+    if let Some(warning) = add_dir_warning_message(&cli.add_dir, &config.sandbox_policy) {
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!("Error adding directories: {warning}");
+            std::process::exit(1);
+        }
+    }
+
+    #[allow(clippy::print_stderr)]
+    if let Err(err) = enforce_login_restrictions(&config).await {
+        eprintln!("{err}");
+        std::process::exit(1);
+    }
+
+    let active_profile = config.active_profile.clone();
     let log_dir = codex_core::config::log_dir(&config)?;
     std::fs::create_dir_all(&log_dir)?;
     // Open (or create) your log file, appending to it.
@@ -500,7 +515,20 @@ async fn run_ratatui_app(
             Some(path) => resume_picker::ResumeSelection::Resume(path),
             None => {
                 error!("Error finding conversation path: {id_str}");
-                resume_picker::ResumeSelection::StartFresh
+                restore();
+                session_log::log_session_end();
+                let _ = tui.terminal.clear();
+                if let Err(err) = writeln!(
+                    std::io::stdout(),
+                    "No saved session found with ID {id_str}. Run `codex resume` without an ID to choose from existing sessions."
+                ) {
+                    error!("Failed to write resume error message: {err}");
+                }
+                return Ok(AppExitInfo {
+                    token_usage: codex_core::protocol::TokenUsage::default(),
+                    conversation_id: None,
+                    update_action: None,
+                });
             }
         }
     } else if cli.resume_last {
@@ -566,53 +594,6 @@ fn restore() {
         eprintln!(
             "failed to restore terminal. Run `reset` or restart your terminal to recover: {err}"
         );
-    }
-}
-
-/// Get the update action from the environment.
-/// Returns `None` if not managed by npm, bun, or brew.
-#[cfg(not(debug_assertions))]
-pub(crate) fn get_update_action() -> Option<UpdateAction> {
-    let exe = std::env::current_exe().unwrap_or_default();
-    let managed_by_npm = std::env::var_os("CODEX_MANAGED_BY_NPM").is_some();
-    let managed_by_bun = std::env::var_os("CODEX_MANAGED_BY_BUN").is_some();
-    if managed_by_npm {
-        Some(UpdateAction::NpmGlobalLatest)
-    } else if managed_by_bun {
-        Some(UpdateAction::BunGlobalLatest)
-    } else if cfg!(target_os = "macos")
-        && (exe.starts_with("/opt/homebrew") || exe.starts_with("/usr/local"))
-    {
-        Some(UpdateAction::BrewUpgrade)
-    } else {
-        None
-    }
-}
-
-#[cfg(debug_assertions)]
-pub(crate) fn get_update_action() -> Option<UpdateAction> {
-    None
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UpdateAction {
-    NpmGlobalLatest,
-    BunGlobalLatest,
-    BrewUpgrade,
-}
-
-impl UpdateAction {
-    pub fn command_args(&self) -> (&'static str, &'static [&'static str]) {
-        match self {
-            UpdateAction::NpmGlobalLatest => ("npm", &["install", "-g", "@openai/codex@latest"]),
-            UpdateAction::BunGlobalLatest => ("bun", &["install", "-g", "@openai/codex@latest"]),
-            UpdateAction::BrewUpgrade => ("brew", &["upgrade", "codex"]),
-        }
-    }
-
-    pub fn command_str(&self) -> String {
-        let (cmd, args) = self.command_args();
-        format!("{} {}", cmd, args.join(" "))
     }
 }
 

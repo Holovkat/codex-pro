@@ -50,6 +50,7 @@ pub(crate) fn should_persist_event_msg(ev: &EventMsg) -> bool {
         | EventMsg::AgentReasoningDelta(_)
         | EventMsg::AgentReasoningRawContentDelta(_)
         | EventMsg::AgentReasoningSectionBreak(_)
+        | EventMsg::RawResponseItem(_)
         | EventMsg::SessionConfigured(_)
         | EventMsg::McpToolCallBegin(_)
         | EventMsg::McpToolCallEnd(_)
@@ -72,6 +73,8 @@ pub(crate) fn should_persist_event_msg(ev: &EventMsg) -> bool {
         | EventMsg::ShutdownComplete
         | EventMsg::ViewImageToolCall(_)
         | EventMsg::MemoryPreview(_)
-        | EventMsg::ConversationPath(_) => false,
+        | EventMsg::ConversationPath(_)
+        | EventMsg::ItemStarted(_)
+        | EventMsg::ItemCompleted(_) => false,
     }
 }

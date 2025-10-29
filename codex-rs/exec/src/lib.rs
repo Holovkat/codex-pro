@@ -20,10 +20,10 @@ use codex_agentic_core::load_settings;
 use codex_agentic_core::provider::DEFAULT_OPENAI_PROVIDER_ID;
 use codex_agentic_core::provider::ResolveModelProviderArgs;
 use codex_agentic_core::provider::custom_provider_model_info;
-use codex_agentic_core::provider::plan_tool_supported;
 use codex_core::AuthManager;
 use codex_core::ConversationManager;
 use codex_core::NewConversation;
+use codex_core::auth::enforce_login_restrictions;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::OPENAI_DEFAULT_MODEL;
@@ -34,11 +34,11 @@ use codex_core::model_family::find_family_for_model;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::Event;
 use codex_core::protocol::EventMsg;
-use codex_core::protocol::InputItem;
 use codex_core::protocol::Op;
 use codex_core::protocol::SessionSource;
 use codex_core::protocol::TaskCompleteEvent;
 use codex_protocol::config_types::SandboxMode;
+use codex_protocol::user_input::UserInput;
 use event_processor_with_human_output::EventProcessorWithHumanOutput;
 use event_processor_with_jsonl_output::EventProcessorWithJsonOutput;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
@@ -80,7 +80,6 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         sandbox_mode: sandbox_mode_cli_arg,
         prompt,
         output_schema: output_schema_path,
-        include_plan_tool,
         config_overrides,
     } = cli;
 
@@ -170,7 +169,6 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
             .with_force_oss(oss),
     );
     let oss_active = resolution.oss_active;
-
     let custom_provider_selected = resolution
         .provider_override
         .clone()
@@ -189,11 +187,12 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         model_provider: resolution.provider_override.clone(),
         codex_linux_sandbox_exe,
         base_instructions: Some(base_prompt.clone()),
-        include_plan_tool: Some(include_plan_tool && resolution.include_plan_tool),
         include_apply_patch_tool: None,
         include_view_image_tool: None,
         show_raw_agent_reasoning: oss_active.then_some(true),
         tools_web_search_request: None,
+        experimental_sandbox_command_assessment: None,
+        additional_writable_roots: Vec::new(),
     };
 
     if custom_provider_selected.is_none() && resolution.provider_override.is_none() {
@@ -244,6 +243,11 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
     codex_agentic_core::provider::sanitize_reasoning_overrides(&mut config);
     codex_agentic_core::provider::sanitize_tool_overrides(&mut config);
     apply_overlay_to_config(&mut config, &overlay_prompt);
+
+    if let Err(err) = enforce_login_restrictions(&config).await {
+        eprintln!("{err}");
+        std::process::exit(1);
+    }
 
     let otel = codex_core::otel_init::build_provider(&config, env!("CARGO_PKG_VERSION"));
 
@@ -368,9 +372,9 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
 
     // Send images first, if any.
     if !images.is_empty() {
-        let items: Vec<InputItem> = images
+        let items: Vec<UserInput> = images
             .into_iter()
-            .map(|path| InputItem::LocalImage { path })
+            .map(|path| UserInput::LocalImage { path })
             .collect();
         let initial_images_event_id = conversation.submit(Op::UserInput { items }).await?;
         info!("Sent images with event ID: {initial_images_event_id}");
@@ -389,7 +393,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
     }
 
     // Send the prompt.
-    let items: Vec<InputItem> = vec![InputItem::Text { text: prompt }];
+    let items: Vec<UserInput> = vec![UserInput::Text { text: prompt }];
     let initial_prompt_task_id = conversation
         .submit(Op::UserTurn {
             items,
@@ -437,21 +441,14 @@ fn refresh_model_metadata(config: &mut Config) {
     config.model_family = family;
 
     if let Some(info) = get_model_info(&config.model_family) {
-        config.model_context_window = Some(info.context_window);
-        config.model_max_output_tokens = Some(info.max_output_tokens);
+        config.model_context_window = Some(info.context_window());
+        config.model_max_output_tokens = Some(info.max_output_tokens());
         config.model_auto_compact_token_limit = info.auto_compact_token_limit;
     } else {
         config.model_context_window = None;
         config.model_max_output_tokens = None;
         config.model_auto_compact_token_limit = None;
     }
-
-    let model_slug = if config.model.is_empty() {
-        None
-    } else {
-        Some(config.model.as_str())
-    };
-    config.include_plan_tool = plan_tool_supported(config.model_provider_id.as_str(), model_slug);
 }
 
 async fn resolve_resume_path(

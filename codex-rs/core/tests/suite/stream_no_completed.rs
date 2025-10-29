@@ -5,11 +5,9 @@ use std::time::Duration;
 
 use codex_core::ModelProviderInfo;
 use codex_core::WireApi;
-use codex_core::config_types::ProviderKind;
-use codex_core::config_types::ProviderReasoningControls;
 use codex_core::protocol::EventMsg;
-use codex_core::protocol::InputItem;
 use codex_core::protocol::Op;
+use codex_protocol::user_input::UserInput;
 use core_test_support::load_sse_fixture;
 use core_test_support::load_sse_fixture_with_id;
 use core_test_support::skip_if_no_network;
@@ -75,6 +73,7 @@ async fn retries_on_early_close() {
         // provider is not set.
         env_key: Some("PATH".into()),
         env_key_instructions: None,
+        experimental_bearer_token: None,
         wire_api: WireApi::Responses,
         query_params: None,
         http_headers: None,
@@ -84,8 +83,6 @@ async fn retries_on_early_close() {
         stream_max_retries: Some(1),
         stream_idle_timeout_ms: Some(2000),
         requires_openai_auth: false,
-        provider_kind: ProviderKind::OpenAiResponses,
-        reasoning_controls: ProviderReasoningControls::default(),
     };
 
     let TestCodex { codex, .. } = test_codex()
@@ -98,7 +95,7 @@ async fn retries_on_early_close() {
 
     codex
         .submit(Op::UserInput {
-            items: vec![InputItem::Text {
+            items: vec![UserInput::Text {
                 text: "hello".into(),
             }],
         })

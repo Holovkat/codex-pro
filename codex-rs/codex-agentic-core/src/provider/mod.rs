@@ -155,7 +155,6 @@ pub struct ModelProviderResolution {
     pub model: Option<String>,
     pub provider_override: Option<String>,
     pub oss_active: bool,
-    pub include_plan_tool: bool,
 }
 
 #[derive(Debug)]
@@ -282,13 +281,10 @@ pub fn resolve_model_provider(args: ResolveModelProviderArgs<'_>) -> ModelProvid
         .as_deref()
         .unwrap_or(DEFAULT_OPENAI_PROVIDER_ID);
     let oss_active = provider_id == OSS_PROVIDER_ID;
-    let include_plan_tool = plan_tool_supported(provider_id, model.as_deref());
-
     ModelProviderResolution {
         model,
         provider_override,
         oss_active,
-        include_plan_tool,
     }
 }
 
@@ -325,8 +321,7 @@ pub fn custom_provider_model_info(provider_id: &str, custom: &CustomProvider) ->
         stream_max_retries: None,
         stream_idle_timeout_ms: None,
         requires_openai_auth: false,
-        provider_kind: custom.provider_kind,
-        reasoning_controls: custom.reasoning_controls.clone(),
+        experimental_bearer_token: None,
     };
 
     info.base_url = match custom.provider_kind {
@@ -418,15 +413,6 @@ pub fn sanitize_reasoning_overrides(config: &mut Config) {
 /// Disable tool surfaces that the active provider cannot support.
 pub fn sanitize_tool_overrides(config: &mut Config) {
     let provider_allows_tools = config.provider_allows_tool_calls();
-
-    let plan_enabled = provider_allows_tools
-        && config.include_plan_tool
-        && plan_tool_supported(
-            config.model_provider_id.as_str(),
-            Some(config.model.as_str()),
-        );
-    config.include_plan_tool = plan_enabled;
-    toggle_feature(&mut config.features, Feature::PlanTool, plan_enabled);
 
     let apply_patch_enabled = provider_allows_tools && config.include_apply_patch_tool;
     config.include_apply_patch_tool = apply_patch_enabled;

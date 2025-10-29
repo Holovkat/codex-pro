@@ -21,9 +21,9 @@ from typing import Any, Literal
 SCHEMA_VERSION = "2025-06-18"
 JSONRPC_VERSION = "2.0"
 
-STANDARD_DERIVE = "#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, TS)]\n"
+STANDARD_DERIVE = "#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]\n"
 STANDARD_HASHABLE_DERIVE = (
-    "#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Hash, Eq, TS)]\n"
+    "#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Hash, Eq, JsonSchema, TS)]\n"
 )
 
 # Will be populated with the schema's `definitions` map in `main()` so that
@@ -94,6 +94,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::convert::TryFrom;
 
+use schemars::JsonSchema;
 use ts_rs::TS;
 
 pub const MCP_SCHEMA_VERSION: &str = "{SCHEMA_VERSION}";
@@ -215,7 +216,7 @@ def run_check(schema_file: Path, crate_dir: Path, checked_in_lib: Path) -> int:
         manifest_text = manifest_path.read_text(encoding="utf-8")
         manifest_text = manifest_text.replace(
             "version = { workspace = true }",
-            'version = "0.0.0"',
+            'version = "0.50.0"',
         )
         manifest_text = manifest_text.replace("\n[lints]\nworkspace = true\n", "\n")
         manifest_path.write_text(manifest_text, encoding="utf-8")

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use chrono::DateTime;
 use chrono::Local;
+use chrono::Utc;
 use codex_common::create_config_summary_entries;
 // rollback: avoid WireApi usage
 use codex_core::auth::get_auth_file;
@@ -341,7 +342,7 @@ fn format_rate_limit_window(
     window: &RateLimitWindow,
     captured_at: Option<&DateTime<Local>>,
 ) -> String {
-    let resets = captured_at.and_then(|ts| format_reset(window.resets_in_seconds, ts));
+    let resets = captured_at.and_then(|ts| format_reset(window.resets_at, ts));
     let label = match window.window_minutes {
         Some(minutes) => format!("{label} ({})", describe_window(minutes)),
         None => label.to_string(),
@@ -349,7 +350,8 @@ fn format_rate_limit_window(
     format_rate_limit_row(label, window.used_percent, resets)
 }
 
-fn describe_window(minutes: u64) -> String {
+fn describe_window(minutes: i64) -> String {
+    let minutes = minutes.max(0) as u64;
     const MINUTES_PER_HOUR: u64 = 60;
     const MINUTES_PER_DAY: u64 = 24 * MINUTES_PER_HOUR;
     const MINUTES_PER_WEEK: u64 = 7 * MINUTES_PER_DAY;
@@ -396,10 +398,10 @@ fn render_status_limit_progress_bar(percent_used: f64) -> String {
     )
 }
 
-fn format_reset(resets_in_seconds: Option<u64>, captured_at: &DateTime<Local>) -> Option<String> {
-    let seconds = i64::try_from(resets_in_seconds?).ok()?;
-    let reset_time = captured_at.checked_add_signed(chrono::Duration::seconds(seconds))?;
-    Some(format_reset_timestamp(reset_time, *captured_at))
+fn format_reset(resets_at: Option<i64>, captured_at: &DateTime<Local>) -> Option<String> {
+    let reset_at = resets_at?;
+    let timestamp = DateTime::<Utc>::from_timestamp(reset_at, 0)?.with_timezone(&Local);
+    Some(format_reset_timestamp(timestamp, *captured_at))
 }
 
 fn format_reset_timestamp(dt: DateTime<Local>, captured_at: DateTime<Local>) -> String {
@@ -453,7 +455,8 @@ fn title_case(input: &str) -> String {
     result
 }
 
-fn format_tokens_compact(value: u64) -> String {
+fn format_tokens_compact(value: i64) -> String {
+    let value = value.max(0) as u64;
     if value == 0 {
         return "0".to_string();
     }

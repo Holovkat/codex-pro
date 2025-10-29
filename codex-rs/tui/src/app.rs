@@ -14,8 +14,9 @@ use crate::chatwidget::refresh_model_metadata;
 use crate::diff_render::DiffSummary;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::file_search::FileSearchManager;
-use crate::get_update_action;
 use crate::history_cell::HistoryCell;
+#[cfg(not(debug_assertions))]
+use crate::history_cell::UpdateAvailableHistoryCell;
 use crate::index_delta::SnapshotDiff;
 use crate::index_delta::spawn_delta_monitor;
 use crate::index_status::IndexStatusSnapshot;
@@ -52,6 +53,7 @@ use codex_core::WireApi;
 use codex_core::config::Config;
 use codex_core::config::OPENAI_DEFAULT_MODEL;
 use codex_core::config::persist_model_selection;
+use codex_core::config::set_hide_full_access_warning;
 use codex_core::config_types::ProviderKind;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::SessionSource;
@@ -78,7 +80,9 @@ use tokio::select;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::time;
 use tracing::warn;
-// use uuid::Uuid;
+
+#[cfg(not(debug_assertions))]
+use crate::history_cell::UpdateAvailableHistoryCell;
 
 const INDEX_STATUS_REFRESH_SECS: u64 = 60;
 const INDEX_TOAST_DURATION_SECS: u64 = 5;
@@ -516,6 +520,8 @@ impl App {
         let last_index_attempt = index_status
             .as_ref()
             .and_then(|snapshot| snapshot.analytics.last_attempt_ts);
+        #[cfg(not(debug_assertions))]
+        let upgrade_version = crate::updates::get_upgrade_version(&config);
 
         let mut app = Self {
             server: conversation_manager,
@@ -541,7 +547,7 @@ impl App {
             commit_anim_running: Arc::new(AtomicBool::new(false)),
             backtrack: BacktrackState::default(),
             feedback,
-            pending_update_action: get_update_action(),
+            pending_update_action: None,
         };
 
         app.refresh_index_status_line();
@@ -553,6 +559,17 @@ impl App {
             app.app_event_tx.clone(),
             Duration::from_secs(INDEX_DELTA_POLL_SECS),
         );
+        #[cfg(not(debug_assertions))]
+        if let Some(latest_version) = upgrade_version {
+            app.handle_event(
+                tui,
+                AppEvent::InsertHistoryCell(Box::new(UpdateAvailableHistoryCell::new(
+                    latest_version,
+                    crate::updates::get_update_action(),
+                ))),
+            )
+            .await?;
+        }
 
         let tui_events = tui.event_stream();
         tokio::pin!(tui_events);
@@ -595,6 +612,26 @@ impl App {
         }
         let line = self.index_status.as_ref().map(format_index_status);
         self.chat_widget.set_index_status_line(line);
+    }
+
+    fn apply_model_provider(&mut self, provider_id: &str) {
+        if self.config.model_provider_id == provider_id {
+            return;
+        }
+        if let Some(info) = self.config.model_providers.get(provider_id).cloned() {
+            self.config.model_provider_id = provider_id.to_string();
+            self.config.model_provider = info;
+            refresh_model_metadata(&mut self.config);
+            sanitize_reasoning_overrides(&mut self.config);
+            sanitize_tool_overrides(&mut self.config);
+            self.chat_widget
+                .set_model_provider(&self.config.model_provider_id, &self.config.model_provider);
+        } else {
+            tracing::warn!(
+                provider_id,
+                "selected model provider not found in config when applying model preset"
+            );
+        }
     }
 
     fn start_index_build(&mut self) {
@@ -915,6 +952,24 @@ impl App {
                 ));
                 tui.frame_requester().schedule_frame();
             }
+            AppEvent::OpenFullAccessConfirmation { preset } => {
+                self.chat_widget.open_full_access_confirmation(preset);
+            }
+            AppEvent::UpdateFullAccessWarningAcknowledged(acknowledged) => {
+                self.chat_widget
+                    .set_full_access_warning_acknowledged(acknowledged);
+                self.config.notices.hide_full_access_warning = Some(acknowledged);
+            }
+            AppEvent::PersistFullAccessWarningAcknowledged => {
+                if let Some(value) = self.config.notices.hide_full_access_warning
+                    && let Err(err) = set_hide_full_access_warning(&self.config.codex_home, value)
+                {
+                    tracing::error!("failed to persist full access warning acknowledgement: {err}");
+                }
+            }
+            AppEvent::OpenApprovalsPopup => {
+                self.chat_widget.open_approvals_popup();
+            }
             AppEvent::OpenSearchManager => {
                 self.open_search_manager();
             }
@@ -946,20 +1001,13 @@ impl App {
             AppEvent::UpdateReasoningEffort(effort) => {
                 self.on_update_reasoning_effort(effort);
             }
-            AppEvent::UpdateModelProvider(provider_id) => {
-                if let Some(info) = self.config.model_providers.get(&provider_id).cloned() {
-                    self.config.model_provider_id = provider_id;
-                    self.config.model_provider = info;
-                    refresh_model_metadata(&mut self.config);
-                    sanitize_reasoning_overrides(&mut self.config);
-                    sanitize_tool_overrides(&mut self.config);
-                    self.chat_widget.set_model_provider(
-                        &self.config.model_provider_id,
-                        &self.config.model_provider,
-                    );
+            AppEvent::OpenReasoningPopup { model } => {
+                if let Some(provider_id) = model.provider_id.as_deref() {
+                    self.apply_model_provider(provider_id);
                 } else {
-                    tracing::warn!(provider_id, "selected model provider not found in config");
+                    self.apply_model_provider(DEFAULT_OPENAI_PROVIDER_ID);
                 }
+                self.chat_widget.open_reasoning_popup(model);
             }
             AppEvent::UpdateModel(model) => {
                 self.chat_widget.set_model(&model);
@@ -968,13 +1016,14 @@ impl App {
                 sanitize_reasoning_overrides(&mut self.config);
                 sanitize_tool_overrides(&mut self.config);
             }
-            AppEvent::OpenReasoningPopup {
-                model,
-                provider_id,
-                presets,
+            AppEvent::OpenFeedbackNote {
+                category,
+                include_logs,
             } => {
-                self.chat_widget
-                    .open_reasoning_popup(model, provider_id, presets);
+                self.chat_widget.open_feedback_note(category, include_logs);
+            }
+            AppEvent::OpenFeedbackConsent { category } => {
+                self.chat_widget.open_feedback_consent(category);
             }
             AppEvent::PersistModelSelection { model, effort } => {
                 let profile = self.active_profile.as_deref();
@@ -1195,7 +1244,8 @@ impl App {
             context,
             on_submit,
         );
-        self.chat_widget.push_bottom_view(Box::new(view));
+        self.chat_widget
+            .push_bottom_view(move |pane| pane.show_view(Box::new(view)));
     }
 
     fn show_search_confidence_prompt(&mut self) {
@@ -1215,7 +1265,8 @@ impl App {
             on_submit,
         )
         .with_allow_empty_submit(true);
-        self.chat_widget.push_bottom_view(Box::new(view));
+        self.chat_widget
+            .push_bottom_view(move |pane| pane.show_view(Box::new(view)));
     }
 
     fn handle_search_confidence_submission(&mut self, raw: String) {
@@ -1935,7 +1986,8 @@ impl App {
                     | ByokDraftField::AnthropicBudgetTokens
                     | ByokDraftField::AnthropicBudgetWeight
             ));
-        self.chat_widget.push_bottom_view(Box::new(view));
+        self.chat_widget
+            .push_bottom_view(move |pane| pane.show_view(Box::new(view)));
     }
 
     fn update_byok_draft_field(&mut self, field: ByokDraftField, value: String) {

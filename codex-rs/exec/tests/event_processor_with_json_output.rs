@@ -828,12 +828,12 @@ fn task_complete_includes_rate_limits() {
         primary: Some(RateLimitWindow {
             used_percent: 42.0,
             window_minutes: Some(300),
-            resets_in_seconds: Some(900),
+            resets_at: Some(1_735_690_500),
         }),
         secondary: Some(RateLimitWindow {
             used_percent: 18.0,
             window_minutes: Some(10_080),
-            resets_in_seconds: Some(86_400),
+            resets_at: Some(1_735_776_000),
         }),
     };
 

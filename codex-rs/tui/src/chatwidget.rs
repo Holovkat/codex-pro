@@ -3,14 +3,14 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use codex_agentic_core::list_models_for_provider_blocking;
-use codex_agentic_core::provider::DEFAULT_OPENAI_PROVIDER_ID;
-use codex_agentic_core::provider::plan_tool_supported;
-use codex_agentic_core::settings;
 use codex_core::config::Config;
 use codex_core::config_types::Notifications;
+use codex_core::get_model_info;
 use codex_core::git_info::current_branch_name;
 use codex_core::git_info::local_git_branches;
+use codex_core::model_family::derive_default_model_family;
+use codex_core::model_family::find_family_for_model;
+use codex_core::project_doc::DEFAULT_PROJECT_DOC_FILENAME;
 use codex_core::protocol::AgentMessageDeltaEvent;
 use codex_core::protocol::AgentMessageEvent;
 use codex_core::protocol::AgentReasoningDeltaEvent;
@@ -26,8 +26,6 @@ use codex_core::protocol::ExecApprovalRequestEvent;
 use codex_core::protocol::ExecCommandBeginEvent;
 use codex_core::protocol::ExecCommandEndEvent;
 use codex_core::protocol::ExitedReviewModeEvent;
-use codex_core::protocol::InputItem;
-use codex_core::protocol::InputMessageKind;
 use codex_core::protocol::ListCustomPromptsResponseEvent;
 use codex_core::protocol::McpListToolsResponseEvent;
 use codex_core::protocol::McpToolCallBeginEvent;
@@ -47,9 +45,9 @@ use codex_core::protocol::UserMessageEvent;
 use codex_core::protocol::ViewImageToolCallEvent;
 use codex_core::protocol::WebSearchBeginEvent;
 use codex_core::protocol::WebSearchEndEvent;
-use codex_feedback::CodexFeedback;
 use codex_protocol::ConversationId;
 use codex_protocol::parse_command::ParsedCommand;
+use codex_protocol::user_input::UserInput;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
@@ -59,8 +57,13 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
+use ratatui::style::Stylize;
+use ratatui::text::Line;
+use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 use ratatui::widgets::WidgetRef;
+use ratatui::widgets::Wrap;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::debug;
 
@@ -69,7 +72,6 @@ use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
-use crate::bottom_pane::BottomPaneView;
 use crate::bottom_pane::CancellationEvent;
 use crate::bottom_pane::InputResult;
 use crate::bottom_pane::SelectionAction;
@@ -88,9 +90,10 @@ use crate::history_cell::AgentMessageCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::McpToolCallCell;
 use crate::markdown::append_markdown;
+use crate::render::renderable::ColumnRenderable;
+use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
 use crate::status::RateLimitSnapshotDisplay;
-use crate::status::compose_rate_limit_footer;
 use crate::text_formatting::truncate_text;
 use crate::tui::FrameRequester;
 mod interrupts;
@@ -108,14 +111,9 @@ use codex_common::approval_presets::ApprovalPreset;
 use codex_common::approval_presets::builtin_approval_presets;
 use codex_common::model_presets::ModelPreset;
 use codex_common::model_presets::builtin_model_presets;
-use codex_common::rate_limits::RateLimitWindowKind;
-use codex_common::rate_limits::resolve_window_kind;
 use codex_core::AuthManager;
 use codex_core::ConversationManager;
 use codex_core::ModelProviderInfo;
-use codex_core::get_model_info;
-use codex_core::model_family::derive_default_model_family;
-use codex_core::model_family::find_family_for_model;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
 use codex_core::protocol_config_types::ReasoningEffort as ReasoningEffortConfig;
@@ -125,7 +123,6 @@ use codex_git_tooling::GhostCommit;
 use codex_git_tooling::GitToolingError;
 use codex_git_tooling::create_ghost_commit;
 use codex_git_tooling::restore_ghost_commit;
-
 use codex_protocol::plan_tool::UpdatePlanArgs;
 use strum::IntoEnumIterator;
 
@@ -149,9 +146,9 @@ impl RateLimitWarningState {
     fn take_warnings(
         &mut self,
         secondary_used_percent: Option<f64>,
-        secondary_window_minutes: Option<u64>,
+        secondary_window_minutes: Option<i64>,
         primary_used_percent: Option<f64>,
-        primary_window_minutes: Option<u64>,
+        primary_window_minutes: Option<i64>,
     ) -> Vec<String> {
         let reached_secondary_cap =
             matches!(secondary_used_percent, Some(percent) if percent == 100.0);
@@ -171,9 +168,9 @@ impl RateLimitWarningState {
                 self.secondary_index += 1;
             }
             if let Some(threshold) = highest_secondary {
-                let limit_label =
-                    resolve_window_kind(secondary_window_minutes, RateLimitWindowKind::Weekly)
-                        .label();
+                let limit_label = secondary_window_minutes
+                    .map(get_limits_duration)
+                    .unwrap_or_else(|| "weekly".to_string());
                 warnings.push(format!(
                     "Heads up, you've used over {threshold:.0}% of your {limit_label} limit. Run /status for a breakdown."
                 ));
@@ -189,9 +186,9 @@ impl RateLimitWarningState {
                 self.primary_index += 1;
             }
             if let Some(threshold) = highest_primary {
-                let limit_label =
-                    resolve_window_kind(primary_window_minutes, RateLimitWindowKind::Hours(5))
-                        .label();
+                let limit_label = primary_window_minutes
+                    .map(get_limits_duration)
+                    .unwrap_or_else(|| "5h".to_string());
                 warnings.push(format!(
                     "Heads up, you've used over {threshold:.0}% of your {limit_label} limit. Run /status for a breakdown."
                 ));
@@ -199,6 +196,28 @@ impl RateLimitWarningState {
         }
 
         warnings
+    }
+}
+
+pub(crate) fn get_limits_duration(windows_minutes: i64) -> String {
+    const MINUTES_PER_HOUR: i64 = 60;
+    const MINUTES_PER_DAY: i64 = 24 * MINUTES_PER_HOUR;
+    const MINUTES_PER_WEEK: i64 = 7 * MINUTES_PER_DAY;
+    const MINUTES_PER_MONTH: i64 = 30 * MINUTES_PER_DAY;
+    const ROUNDING_BIAS_MINUTES: i64 = 3;
+
+    let windows_minutes = windows_minutes.max(0);
+
+    if windows_minutes <= MINUTES_PER_DAY.saturating_add(ROUNDING_BIAS_MINUTES) {
+        let adjusted = windows_minutes.saturating_add(ROUNDING_BIAS_MINUTES);
+        let hours = std::cmp::max(1, adjusted / MINUTES_PER_HOUR);
+        format!("{hours}h")
+    } else if windows_minutes <= MINUTES_PER_WEEK.saturating_add(ROUNDING_BIAS_MINUTES) {
+        "weekly".to_string()
+    } else if windows_minutes <= MINUTES_PER_MONTH.saturating_add(ROUNDING_BIAS_MINUTES) {
+        "monthly".to_string()
+    } else {
+        "annual".to_string()
     }
 }
 
@@ -210,8 +229,8 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) initial_prompt: Option<String>,
     pub(crate) initial_images: Vec<PathBuf>,
     pub(crate) enhanced_keys_supported: bool,
-    pub(crate) feedback: CodexFeedback,
     pub(crate) auth_manager: Arc<AuthManager>,
+    pub(crate) feedback: codex_feedback::CodexFeedback,
 }
 
 pub(crate) struct ChatWidget {
@@ -236,6 +255,10 @@ pub(crate) struct ChatWidget {
     reasoning_buffer: String,
     // Accumulates full reasoning content for transcript-only recording
     full_reasoning_buffer: String,
+    // Current status header shown in the status indicator.
+    current_status_header: String,
+    // Previous status header to restore after a transient stream retry.
+    retry_status_header: Option<String>,
     conversation_id: Option<ConversationId>,
     frame_requester: FrameRequester,
     // Whether to include the initial welcome banner on session configured
@@ -256,7 +279,10 @@ pub(crate) struct ChatWidget {
     needs_final_message_separator: bool,
 
     last_rendered_width: std::cell::Cell<Option<usize>>,
-    feedback: CodexFeedback,
+    // Feedback sink for /feedback
+    feedback: codex_feedback::CodexFeedback,
+    // Current session rollout path (if known)
+    current_rollout_path: Option<PathBuf>,
 }
 
 struct UserMessage {
@@ -282,16 +308,6 @@ fn create_initial_user_message(text: String, image_paths: Vec<PathBuf>) -> Optio
 }
 
 impl ChatWidget {
-    fn model_description_for(slug: &str) -> Option<&'static str> {
-        if slug.starts_with("gpt-5-codex") {
-            Some("Optimized for coding tasks with many tools.")
-        } else if slug.starts_with("gpt-5") {
-            Some("Broad world knowledge with strong general reasoning.")
-        } else {
-            None
-        }
-    }
-
     fn flush_answer_stream_with_separator(&mut self) {
         if let Some(mut controller) = self.stream_controller.take()
             && let Some(cell) = controller.finalize()
@@ -300,11 +316,20 @@ impl ChatWidget {
         }
     }
 
+    fn set_status_header(&mut self, header: String) {
+        if self.current_status_header == header {
+            return;
+        }
+        self.current_status_header = header.clone();
+        self.bottom_pane.update_status_header(header);
+    }
+
     // --- Small event handlers ---
     fn on_session_configured(&mut self, event: codex_core::protocol::SessionConfiguredEvent) {
         self.bottom_pane
             .set_history_metadata(event.history_log_id, event.history_entry_count);
         self.conversation_id = Some(event.session_id);
+        self.current_rollout_path = Some(event.rollout_path.clone());
         let initial_messages = event.initial_messages.clone();
         let model_for_header = event.model.clone();
         self.session_header.set_model(&model_for_header);
@@ -324,6 +349,39 @@ impl ChatWidget {
         if !self.suppress_session_configured_redraw {
             self.request_redraw();
         }
+    }
+
+    pub(crate) fn open_feedback_note(
+        &mut self,
+        category: crate::app_event::FeedbackCategory,
+        include_logs: bool,
+    ) {
+        // Build a fresh snapshot at the time of opening the note overlay.
+        let snapshot = self.feedback.snapshot(self.conversation_id);
+        let rollout = if include_logs {
+            self.current_rollout_path.clone()
+        } else {
+            None
+        };
+        let view = crate::bottom_pane::FeedbackNoteView::new(
+            category,
+            snapshot,
+            rollout,
+            self.app_event_tx.clone(),
+            include_logs,
+        );
+        self.bottom_pane.show_view(Box::new(view));
+        self.request_redraw();
+    }
+
+    pub(crate) fn open_feedback_consent(&mut self, category: crate::app_event::FeedbackCategory) {
+        let params = crate::bottom_pane::feedback_upload_consent_params(
+            self.app_event_tx.clone(),
+            category,
+            self.current_rollout_path.clone(),
+        );
+        self.bottom_pane.show_selection_view(params);
+        self.request_redraw();
     }
 
     fn on_agent_message(&mut self, message: String) {
@@ -349,7 +407,7 @@ impl ChatWidget {
 
         if let Some(header) = extract_first_bold(&self.reasoning_buffer) {
             // Update the shimmer header to the extracted reasoning chunk header.
-            self.bottom_pane.update_status_header(header);
+            self.set_status_header(header);
         } else {
             // Fallback while we don't yet have a bold header: leave existing header as-is.
         }
@@ -383,6 +441,8 @@ impl ChatWidget {
     fn on_task_started(&mut self) {
         self.bottom_pane.clear_ctrl_c_quit_hint();
         self.bottom_pane.set_task_running(true);
+        self.retry_status_header = None;
+        self.set_status_header(String::from("Working"));
         self.full_reasoning_buffer.clear();
         self.reasoning_buffer.clear();
         self.request_redraw();
@@ -418,23 +478,6 @@ impl ChatWidget {
         }
     }
 
-    pub(crate) fn set_index_status_line(&mut self, status: Option<String>) {
-        self.bottom_pane.set_index_status_line(status);
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn show_index_progress(&mut self, header: &str, messages: Vec<String>) {
-        self.bottom_pane.set_task_running(true);
-        self.bottom_pane.update_status_header(header.to_string());
-        self.bottom_pane.set_queued_user_messages(messages);
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn finish_index_progress(&mut self) {
-        self.bottom_pane.set_task_running(false);
-        self.bottom_pane.set_queued_user_messages(Vec::new());
-    }
-
     fn on_rate_limit_snapshot(&mut self, snapshot: Option<RateLimitSnapshot>) {
         if let Some(snapshot) = snapshot {
             let warnings = self.rate_limit_warnings.take_warnings(
@@ -454,9 +497,9 @@ impl ChatWidget {
             );
 
             let display = crate::status::rate_limit_snapshot_display(&snapshot, Local::now());
-            let footer_summaries = compose_rate_limit_footer(Some(&display));
+            let summaries = crate::status::compose_rate_limit_footer(Some(&display));
+            self.bottom_pane.set_rate_limit_summaries(summaries);
             self.rate_limit_snapshot = Some(display);
-            self.bottom_pane.set_rate_limit_summaries(footer_summaries);
 
             if !warnings.is_empty() {
                 for warning in warnings {
@@ -465,8 +508,8 @@ impl ChatWidget {
                 self.request_redraw();
             }
         } else {
-            self.rate_limit_snapshot = None;
             self.bottom_pane.set_rate_limit_summaries(Vec::new());
+            self.rate_limit_snapshot = None;
         }
     }
     /// Finalize any active exec as failed and stop/clear running UI state.
@@ -497,7 +540,7 @@ impl ChatWidget {
 
         if reason != TurnAbortReason::ReviewEnded {
             self.add_to_history(history_cell::new_error_event(
-                "Conversation interrupted - tell the model what to do differently".to_owned(),
+                "Conversation interrupted - tell the model what to do differently. Something went wrong? Hit `/feedback` to report the issue.".to_owned(),
             ));
         }
 
@@ -528,6 +571,11 @@ impl ChatWidget {
 
     fn on_plan_update(&mut self, update: UpdatePlanArgs) {
         self.add_to_history(history_cell::new_plan_update(update));
+    }
+
+    fn on_memory_preview(&mut self, event: MemoryPreviewEvent) {
+        self.app_event_tx
+            .send(AppEvent::OpenMemoryPreview { preview: event });
     }
 
     fn on_exec_approval_request(&mut self, id: String, ev: ExecApprovalRequestEvent) {
@@ -637,13 +685,11 @@ impl ChatWidget {
         debug!("BackgroundEvent: {message}");
     }
 
-    fn on_memory_preview(&mut self, event: MemoryPreviewEvent) {
-        self.app_event_tx
-            .send(AppEvent::OpenMemoryPreview { preview: event });
-    }
-
     fn on_stream_error(&mut self, message: String) {
-        // Show stream errors in the transcript so users see retry/backoff info.
+        if self.retry_status_header.is_none() {
+            self.retry_status_header = Some(self.current_status_header.clone());
+        }
+        self.set_status_header(message.clone());
         self.add_to_history(history_cell::new_stream_error_event(message));
         self.request_redraw();
     }
@@ -709,7 +755,6 @@ impl ChatWidget {
                 self.needs_final_message_separator = false;
             }
             self.stream_controller = Some(StreamController::new(
-                self.config.clone(),
                 self.last_rendered_width.get().map(|w| w.saturating_sub(2)),
             ));
         }
@@ -751,9 +796,8 @@ impl ChatWidget {
                 &ev.call_id,
                 CommandOutput {
                     exit_code: ev.exit_code,
-                    stdout: ev.stdout.clone(),
-                    stderr: ev.stderr.clone(),
                     formatted_output: ev.formatted_output.clone(),
+                    aggregated_output: ev.aggregated_output.clone(),
                 },
                 ev.duration,
             );
@@ -784,6 +828,7 @@ impl ChatWidget {
             id,
             command: ev.command,
             reason: ev.reason,
+            risk: ev.risk,
         };
         self.bottom_pane.push_approval_request(request);
         self.request_redraw();
@@ -915,8 +960,8 @@ impl ChatWidget {
             initial_prompt,
             initial_images,
             enhanced_keys_supported,
-            feedback,
             auth_manager,
+            feedback,
         } = common;
         let mut rng = rand::rng();
         let placeholder = EXAMPLE_PROMPTS[rng.random_range(0..EXAMPLE_PROMPTS.len())].to_string();
@@ -951,6 +996,8 @@ impl ChatWidget {
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
+            current_status_header: String::from("Working"),
+            retry_status_header: None,
             conversation_id: None,
             queued_user_messages: VecDeque::new(),
             show_welcome_banner: true,
@@ -962,6 +1009,7 @@ impl ChatWidget {
             needs_final_message_separator: false,
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
+            current_rollout_path: None,
         }
     }
 
@@ -978,8 +1026,8 @@ impl ChatWidget {
             initial_prompt,
             initial_images,
             enhanced_keys_supported,
-            feedback,
             auth_manager,
+            feedback,
         } = common;
         let mut rng = rand::rng();
         let placeholder = EXAMPLE_PROMPTS[rng.random_range(0..EXAMPLE_PROMPTS.len())].to_string();
@@ -1016,6 +1064,8 @@ impl ChatWidget {
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
+            current_status_header: String::from("Working"),
+            retry_status_header: None,
             conversation_id: None,
             queued_user_messages: VecDeque::new(),
             show_welcome_banner: true,
@@ -1027,6 +1077,7 @@ impl ChatWidget {
             needs_final_message_separator: false,
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
+            current_rollout_path: None,
         }
     }
 
@@ -1041,20 +1092,20 @@ impl ChatWidget {
     pub(crate) fn handle_key_event(&mut self, key_event: KeyEvent) {
         match key_event {
             KeyEvent {
-                code: KeyCode::Char('c'),
-                modifiers: crossterm::event::KeyModifiers::CONTROL,
+                code: KeyCode::Char(c),
+                modifiers,
                 kind: KeyEventKind::Press,
                 ..
-            } => {
+            } if modifiers.contains(KeyModifiers::CONTROL) && c.eq_ignore_ascii_case(&'c') => {
                 self.on_ctrl_c();
                 return;
             }
             KeyEvent {
-                code: KeyCode::Char('v'),
-                modifiers: KeyModifiers::CONTROL,
+                code: KeyCode::Char(c),
+                modifiers,
                 kind: KeyEventKind::Press,
                 ..
-            } => {
+            } if modifiers.contains(KeyModifiers::CONTROL) && c.eq_ignore_ascii_case(&'v') => {
                 if let Ok((path, info)) = paste_image_to_temp_png() {
                     self.attach_image(path, info.width, info.height, info.encoded_format.label());
                 }
@@ -1104,6 +1155,22 @@ impl ChatWidget {
         }
     }
 
+    fn handle_search_code_command(&mut self, args: Option<String>) {
+        if let Some(query) = args.and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }) {
+            self.app_event_tx
+                .send(AppEvent::SearchCodeRequested { query });
+            return;
+        }
+        self.app_event_tx.send(AppEvent::OpenSearchManager);
+    }
+
     pub(crate) fn attach_image(
         &mut self,
         path: PathBuf,
@@ -1130,13 +1197,25 @@ impl ChatWidget {
             return;
         }
         match cmd {
-            SlashCommand::SearchCode => {
-                self.handle_search_code_command(args);
+            SlashCommand::Feedback => {
+                // Step 1: pick a category (UI built in feedback_view)
+                let params =
+                    crate::bottom_pane::feedback_selection_params(self.app_event_tx.clone());
+                self.bottom_pane.show_selection_view(params);
+                self.request_redraw();
             }
             SlashCommand::New => {
                 self.app_event_tx.send(AppEvent::NewSession);
             }
             SlashCommand::Init => {
+                let init_target = self.config.cwd.join(DEFAULT_PROJECT_DOC_FILENAME);
+                if init_target.exists() {
+                    let message = format!(
+                        "{DEFAULT_PROJECT_DOC_FILENAME} already exists here. Skipping /init to avoid overwriting it."
+                    );
+                    self.add_info_message(message, None);
+                    return;
+                }
                 const INIT_PROMPT: &str = include_str!("../prompt_for_init_command.md");
                 self.submit_text_message(INIT_PROMPT.to_string());
             }
@@ -1150,33 +1229,17 @@ impl ChatWidget {
             SlashCommand::Model => {
                 self.open_model_popup();
             }
-            SlashCommand::Byok => {
-                self.app_event_tx.send(AppEvent::OpenByokManager);
+            SlashCommand::IndexBuild => {
+                self.app_event_tx.send(AppEvent::StartIndexBuild);
             }
             SlashCommand::Approvals => {
                 self.open_approvals_popup();
             }
-            SlashCommand::Feedback => {
-                let snapshot = self.feedback.snapshot(self.conversation_id);
-                match snapshot.save_to_temp_file() {
-                    Ok(path) => {
-                        crate::bottom_pane::FeedbackView::show(
-                            &mut self.bottom_pane,
-                            path,
-                            snapshot,
-                        );
-                        self.request_redraw();
-                    }
-                    Err(e) => {
-                        self.add_to_history(history_cell::new_error_event(format!(
-                            "Failed to save feedback logs: {e}"
-                        )));
-                        self.request_redraw();
-                    }
-                }
+            SlashCommand::SearchCode => {
+                self.handle_search_code_command(args);
             }
-            SlashCommand::Memory => {
-                self.app_event_tx.send(AppEvent::OpenMemoryManager);
+            SlashCommand::Byok => {
+                self.app_event_tx.send(AppEvent::OpenByokManager);
             }
             SlashCommand::Quit => {
                 self.app_event_tx.send(AppEvent::ExitRequest);
@@ -1207,9 +1270,6 @@ impl ChatWidget {
                     tx.send(AppEvent::DiffResult(text));
                 });
             }
-            SlashCommand::IndexBuild => {
-                self.app_event_tx.send(AppEvent::StartIndexBuild);
-            }
             SlashCommand::Mention => {
                 self.insert_str("@");
             }
@@ -1218,6 +1278,9 @@ impl ChatWidget {
             }
             SlashCommand::Mcp => {
                 self.add_mcp_output();
+            }
+            SlashCommand::Memory => {
+                self.app_event_tx.send(AppEvent::OpenMemoryManager);
             }
             #[cfg(debug_assertions)]
             SlashCommand::TestApproval => {
@@ -1258,22 +1321,6 @@ impl ChatWidget {
                 }));
             }
         }
-    }
-
-    fn handle_search_code_command(&mut self, args: Option<String>) {
-        if let Some(query) = args.and_then(|value| {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        }) {
-            self.app_event_tx
-                .send(AppEvent::SearchCodeRequested { query });
-            return;
-        }
-        self.app_event_tx.send(AppEvent::OpenSearchManager);
     }
 
     pub(crate) fn handle_paste(&mut self, text: String) {
@@ -1326,14 +1373,14 @@ impl ChatWidget {
 
         self.capture_ghost_snapshot();
 
-        let mut items: Vec<InputItem> = Vec::new();
+        let mut items: Vec<UserInput> = Vec::new();
 
         if !text.is_empty() {
-            items.push(InputItem::Text { text: text.clone() });
+            items.push(UserInput::Text { text: text.clone() });
         }
 
         for path in image_paths {
-            items.push(InputItem::LocalImage { path });
+            items.push(UserInput::LocalImage { path });
         }
 
         self.codex_op_tx
@@ -1488,6 +1535,7 @@ impl ChatWidget {
             EventMsg::ApplyPatchApprovalRequest(ev) => {
                 self.on_apply_patch_approval_request(id.unwrap_or_default(), ev)
             }
+            EventMsg::MemoryPreview(event) => self.on_memory_preview(event),
             EventMsg::ExecCommandBegin(ev) => self.on_exec_command_begin(ev),
             EventMsg::ExecCommandOutputDelta(delta) => self.on_exec_command_output_delta(delta),
             EventMsg::PatchApplyBegin(ev) => self.on_patch_apply_begin(ev),
@@ -1507,7 +1555,6 @@ impl ChatWidget {
                 self.on_background_event(message)
             }
             EventMsg::StreamError(StreamErrorEvent { message }) => self.on_stream_error(message),
-            EventMsg::MemoryPreview(event) => self.on_memory_preview(event),
             EventMsg::UserMessage(ev) => {
                 if from_replay {
                     self.on_user_message_event(ev);
@@ -1521,6 +1568,9 @@ impl ChatWidget {
                 self.on_entered_review_mode(review_request)
             }
             EventMsg::ExitedReviewMode(review) => self.on_exited_review_mode(review),
+            EventMsg::RawResponseItem(_)
+            | EventMsg::ItemStarted(_)
+            | EventMsg::ItemCompleted(_) => {}
         }
     }
 
@@ -1549,7 +1599,7 @@ impl ChatWidget {
                 } else {
                     // Show explanation when there are no structured findings.
                     let mut rendered: Vec<ratatui::text::Line<'static>> = vec!["".into()];
-                    append_markdown(&explanation, None, &mut rendered, &self.config);
+                    append_markdown(&explanation, None, &mut rendered);
                     let body_cell = AgentMessageCell::new(rendered, false);
                     self.app_event_tx
                         .send(AppEvent::InsertHistoryCell(Box::new(body_cell)));
@@ -1558,7 +1608,7 @@ impl ChatWidget {
                 let message_text =
                     codex_core::review_format::format_review_findings_block(&output.findings, None);
                 let mut message_lines: Vec<ratatui::text::Line<'static>> = Vec::new();
-                append_markdown(&message_text, None, &mut message_lines, &self.config);
+                append_markdown(&message_text, None, &mut message_lines);
                 let body_cell = AgentMessageCell::new(message_lines, true);
                 self.app_event_tx
                     .send(AppEvent::InsertHistoryCell(Box::new(body_cell)));
@@ -1574,17 +1624,9 @@ impl ChatWidget {
     }
 
     fn on_user_message_event(&mut self, event: UserMessageEvent) {
-        match event.kind {
-            Some(InputMessageKind::EnvironmentContext)
-            | Some(InputMessageKind::UserInstructions) => {
-                // Skip XML‑wrapped context blocks in the transcript.
-            }
-            Some(InputMessageKind::Plain) | None => {
-                let message = event.message.trim();
-                if !message.is_empty() {
-                    self.add_to_history(history_cell::new_user_prompt(message.to_string()));
-                }
-            }
+        let message = event.message.trim();
+        if !message.is_empty() {
+            self.add_to_history(history_cell::new_user_prompt(message.to_string()));
         }
     }
 
@@ -1662,134 +1704,38 @@ impl ChatWidget {
             context_usage,
             &self.conversation_id,
             self.rate_limit_snapshot.as_ref(),
+            Local::now(),
         ));
     }
 
     /// Open a popup to choose the model (stage 1). After selecting a model,
     /// a second popup is shown to choose the reasoning effort.
     pub(crate) fn open_model_popup(&mut self) {
-        use std::collections::BTreeMap;
-        use std::collections::HashMap;
-
         let current_model = self.config.model.clone();
-        let current_provider = self.config.model_provider_id.clone();
         let auth_mode = self.auth_manager.auth().map(|auth| auth.mode);
-
-        let mut grouped: BTreeMap<(String, String), Vec<ModelPreset>> = BTreeMap::new();
-        let mut provider_labels: HashMap<String, String> = HashMap::new();
-        let mut placeholder_items: Vec<SelectionItem> = Vec::new();
-
-        provider_labels.insert(DEFAULT_OPENAI_PROVIDER_ID.to_string(), "OpenAI".to_string());
-        for preset in builtin_model_presets(auth_mode) {
-            grouped
-                .entry((DEFAULT_OPENAI_PROVIDER_ID.to_string(), preset.model.clone()))
-                .or_default()
-                .push(preset);
-        }
-
-        let settings_snapshot = settings::global();
-        for (provider_id, provider) in settings_snapshot.custom_providers() {
-            let label = if provider.name.trim().is_empty() {
-                provider_id.clone()
-            } else {
-                provider.name.clone()
-            };
-            provider_labels.insert(provider_id.clone(), label.clone());
-
-            match list_models_for_provider_blocking(&settings_snapshot, provider_id) {
-                Ok(mut models) if !models.is_empty() => {
-                    models.sort();
-                    models.dedup();
-                    for model in models {
-                        grouped
-                            .entry((provider_id.clone(), model.clone()))
-                            .or_default()
-                            .push(ModelPreset {
-                                id: format!("{provider_id}:{model}"),
-                                label: model.clone(),
-                                description: format!("Custom provider `{label}`"),
-                                model,
-                                effort: None,
-                            });
-                    }
-                }
-                Ok(_) => {
-                    let provider_id_for_edit = provider_id.clone();
-                    let provider_label = label.clone();
-                    placeholder_items.push(SelectionItem {
-                        name: format!("{provider_label} [Custom Providers]"),
-                        description: Some(
-                            "No models cached yet. Edit the provider in /BYOK to add a default model or refresh."
-                                .to_string(),
-                        ),
-                        is_current: false,
-                        actions: vec![Box::new(move |tx| {
-                            tx.send(AppEvent::StartByokEdit {
-                                existing_id: Some(provider_id_for_edit.clone()),
-                            });
-                        })],
-                        dismiss_on_select: true,
-                        search_value: Some(format!("{provider_label} {provider_id}")),
-                        ..Default::default()
-                    });
-                }
-                Err(err) => {
-                    self.add_error_message(format!(
-                        "Failed to list models for `{provider_id}`: {err}"
-                    ));
-                }
-            }
-        }
+        let presets: Vec<ModelPreset> = builtin_model_presets(auth_mode);
 
         let mut items: Vec<SelectionItem> = Vec::new();
-        for ((provider_id, model_slug), presets_for_model) in grouped.into_iter() {
-            let provider_label = provider_labels
-                .get(&provider_id)
-                .cloned()
-                .unwrap_or_else(|| provider_id.clone());
-            let name = format!("{model_slug} [{provider_label}]");
-            let description = Self::model_description_for(&model_slug)
-                .map(std::string::ToString::to_string)
-                .or_else(|| {
-                    presets_for_model
-                        .iter()
-                        .find(|preset| !preset.description.is_empty())
-                        .map(|preset| preset.description.clone())
-                })
-                .or_else(|| {
-                    presets_for_model
-                        .first()
-                        .map(|preset| preset.description.clone())
-                });
-            let is_current = model_slug == current_model && provider_id == current_provider;
-            let model_slug_string = model_slug.clone();
-            let provider_for_model = provider_id.clone();
-            let presets_clone = presets_for_model.clone();
+        for preset in presets.into_iter() {
+            let description = if preset.description.is_empty() {
+                None
+            } else {
+                Some(preset.description.to_string())
+            };
+            let is_current = preset.model == current_model;
+            let preset_for_action = preset.clone();
             let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
                 tx.send(AppEvent::OpenReasoningPopup {
-                    model: model_slug_string.clone(),
-                    provider_id: provider_for_model.clone(),
-                    presets: presets_clone.clone(),
+                    model: preset_for_action.clone(),
                 });
             })];
             items.push(SelectionItem {
-                name,
+                name: preset.display_name.to_string(),
                 description,
                 is_current,
                 actions,
                 dismiss_on_select: false,
-                search_value: Some(format!("{model_slug} {provider_label} {provider_id}")),
-                ..Default::default()
-            });
-        }
-
-        items.extend(placeholder_items);
-
-        if items.is_empty() {
-            items.push(SelectionItem {
-                name: "No models available".to_string(),
-                description: Some("Use /BYOK to configure providers".to_string()),
-                dismiss_on_select: true,
+                search_value: Some(preset.model.clone()),
                 ..Default::default()
             });
         }
@@ -1803,46 +1749,20 @@ impl ChatWidget {
         });
     }
 
-    pub(crate) fn show_selection_view(&mut self, params: SelectionViewParams) {
-        self.bottom_pane.show_selection_view(params);
-    }
-
-    pub(crate) fn push_bottom_view(&mut self, view: Box<dyn BottomPaneView>) {
-        self.bottom_pane.show_view(view);
-    }
-
-    pub(crate) fn sync_model_providers(
-        &mut self,
-        providers: &std::collections::HashMap<String, ModelProviderInfo>,
-    ) {
-        self.config.model_providers = providers.clone();
-    }
-
     /// Open a popup to choose the reasoning effort (stage 2) for the given model.
-    pub(crate) fn open_reasoning_popup(
-        &mut self,
-        model_slug: String,
-        provider_id: String,
-        presets: Vec<ModelPreset>,
-    ) {
-        let default_effort = ReasoningEffortConfig::default();
+    pub(crate) fn open_reasoning_popup(&mut self, preset: ModelPreset) {
+        let default_effort: ReasoningEffortConfig = preset.default_reasoning_effort;
+        let supported = preset.supported_reasoning_efforts;
 
-        let has_none_choice = presets.iter().any(|preset| preset.effort.is_none());
         struct EffortChoice {
             stored: Option<ReasoningEffortConfig>,
             display: ReasoningEffortConfig,
         }
         let mut choices: Vec<EffortChoice> = Vec::new();
         for effort in ReasoningEffortConfig::iter() {
-            if presets.iter().any(|preset| preset.effort == Some(effort)) {
+            if supported.iter().any(|option| option.effort == effort) {
                 choices.push(EffortChoice {
                     stored: Some(effort),
-                    display: effort,
-                });
-            }
-            if has_none_choice && default_effort == effort {
-                choices.push(EffortChoice {
-                    stored: None,
                     display: effort,
                 });
             }
@@ -1854,27 +1774,21 @@ impl ChatWidget {
             });
         }
 
-        let default_choice: Option<ReasoningEffortConfig> = if has_none_choice {
-            None
-        } else if choices
+        let default_choice: Option<ReasoningEffortConfig> = choices
             .iter()
             .any(|choice| choice.stored == Some(default_effort))
-        {
-            Some(default_effort)
-        } else {
-            choices
-                .iter()
-                .find_map(|choice| choice.stored)
-                .or(Some(default_effort))
-        };
+            .then_some(Some(default_effort))
+            .flatten()
+            .or_else(|| choices.iter().find_map(|choice| choice.stored))
+            .or(Some(default_effort));
 
-        let is_current_model = self.config.model == model_slug;
+        let model_slug = preset.model.to_string();
+        let is_current_model = self.config.model == preset.model;
         let highlight_choice = if is_current_model {
             self.config.model_reasoning_effort
         } else {
             default_choice
         };
-
         let mut items: Vec<SelectionItem> = Vec::new();
         for choice in choices.iter() {
             let effort = choice.display;
@@ -1886,22 +1800,30 @@ impl ChatWidget {
                 effort_label.push_str(" (default)");
             }
 
-            let description = presets
-                .iter()
-                .find(|preset| preset.effort == choice.stored && !preset.description.is_empty())
-                .map(|preset| preset.description.clone())
-                .or_else(|| {
-                    presets
+            let mut description = choice
+                .stored
+                .and_then(|effort| {
+                    supported
                         .iter()
-                        .find(|preset| preset.effort == choice.stored)
-                        .map(|preset| preset.description.clone())
+                        .find(|option| option.effort == effort)
+                        .map(|option| option.description.to_string())
+                })
+                .filter(|text| !text.is_empty());
+
+            let warning = "⚠ High reasoning effort can quickly consume Plus plan rate limits.";
+            let show_warning =
+                preset.model == "gpt-5-codex" && effort == ReasoningEffortConfig::High;
+            if show_warning {
+                let warning_text = warning.to_string();
+                description = Some(match description {
+                    Some(text) if !text.is_empty() => format!("{text}\n{warning_text}"),
+                    _ => warning_text,
                 });
+            }
 
             let model_for_action = model_slug.clone();
             let effort_for_action = choice.stored;
-            let provider_for_action = provider_id.clone();
             let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
-                tx.send(AppEvent::UpdateModelProvider(provider_for_action.clone()));
                 tx.send(AppEvent::CodexOp(Op::OverrideTurnContext {
                     cwd: None,
                     approval_policy: None,
@@ -1931,13 +1853,17 @@ impl ChatWidget {
                 is_current: is_current_model && choice.stored == highlight_choice,
                 actions,
                 dismiss_on_select: true,
+                search_value: Some(choice.display.to_string()),
                 ..Default::default()
             });
         }
 
+        let header_text = format!("Select Reasoning Level for {model_slug}");
+        let header_line = Line::from(vec![header_text.bold()]);
+        let header = ColumnRenderable::new([Box::new(header_line) as Box<dyn Renderable>]);
+
         self.bottom_pane.show_selection_view(SelectionViewParams {
-            title: Some("Select Reasoning Level".to_string()),
-            subtitle: Some(format!("Reasoning for model {model_slug}")),
+            header: Box::new(header),
             footer_hint: Some(standard_popup_hint_line()),
             items,
             ..Default::default()
@@ -1953,22 +1879,24 @@ impl ChatWidget {
         for preset in presets.into_iter() {
             let is_current =
                 current_approval == preset.approval && current_sandbox == preset.sandbox;
-            let approval = preset.approval;
-            let sandbox = preset.sandbox.clone();
             let name = preset.label.to_string();
             let description = Some(preset.description.to_string());
-            let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
-                tx.send(AppEvent::CodexOp(Op::OverrideTurnContext {
-                    cwd: None,
-                    approval_policy: Some(approval),
-                    sandbox_policy: Some(sandbox.clone()),
-                    model: None,
-                    effort: None,
-                    summary: None,
-                }));
-                tx.send(AppEvent::UpdateAskForApprovalPolicy(approval));
-                tx.send(AppEvent::UpdateSandboxPolicy(sandbox.clone()));
-            })];
+            let requires_confirmation = preset.id == "full-access"
+                && !self
+                    .config
+                    .notices
+                    .hide_full_access_warning
+                    .unwrap_or(false);
+            let actions: Vec<SelectionAction> = if requires_confirmation {
+                let preset_clone = preset.clone();
+                vec![Box::new(move |tx| {
+                    tx.send(AppEvent::OpenFullAccessConfirmation {
+                        preset: preset_clone.clone(),
+                    });
+                })]
+            } else {
+                Self::approval_preset_actions(preset.approval, preset.sandbox.clone())
+            };
             items.push(SelectionItem {
                 name,
                 description,
@@ -1987,6 +1915,89 @@ impl ChatWidget {
         });
     }
 
+    fn approval_preset_actions(
+        approval: AskForApproval,
+        sandbox: SandboxPolicy,
+    ) -> Vec<SelectionAction> {
+        vec![Box::new(move |tx| {
+            let sandbox_clone = sandbox.clone();
+            tx.send(AppEvent::CodexOp(Op::OverrideTurnContext {
+                cwd: None,
+                approval_policy: Some(approval),
+                sandbox_policy: Some(sandbox_clone.clone()),
+                model: None,
+                effort: None,
+                summary: None,
+            }));
+            tx.send(AppEvent::UpdateAskForApprovalPolicy(approval));
+            tx.send(AppEvent::UpdateSandboxPolicy(sandbox_clone));
+        })]
+    }
+
+    pub(crate) fn open_full_access_confirmation(&mut self, preset: ApprovalPreset) {
+        let approval = preset.approval;
+        let sandbox = preset.sandbox;
+        let title_line = Line::from(vec!["Enable full access?".bold()]);
+        let info_line = Line::from(vec![
+            "When Codex runs with full access, it can edit any file on your computer and run commands with network, without your approval. "
+                .into(),
+            "Exercise caution when enabling full access. This significantly increases the risk of data loss, leaks, or unexpected behavior."
+                .fg(Color::Red),
+        ]);
+        let header_children: Vec<Box<dyn Renderable>> = vec![
+            Box::new(title_line) as Box<dyn Renderable>,
+            Box::new(Paragraph::new(vec![info_line]).wrap(Wrap { trim: false }))
+                as Box<dyn Renderable>,
+        ];
+        let header = ColumnRenderable::new(header_children);
+
+        let mut accept_actions = Self::approval_preset_actions(approval, sandbox.clone());
+        accept_actions.push(Box::new(|tx| {
+            tx.send(AppEvent::UpdateFullAccessWarningAcknowledged(true));
+        }));
+
+        let mut accept_and_remember_actions = Self::approval_preset_actions(approval, sandbox);
+        accept_and_remember_actions.push(Box::new(|tx| {
+            tx.send(AppEvent::UpdateFullAccessWarningAcknowledged(true));
+            tx.send(AppEvent::PersistFullAccessWarningAcknowledged);
+        }));
+
+        let deny_actions: Vec<SelectionAction> = vec![Box::new(|tx| {
+            tx.send(AppEvent::OpenApprovalsPopup);
+        })];
+
+        let items = vec![
+            SelectionItem {
+                name: "Yes, continue anyway".to_string(),
+                description: Some("Apply full access for this session".to_string()),
+                actions: accept_actions,
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+            SelectionItem {
+                name: "Yes, and don't ask again".to_string(),
+                description: Some("Enable full access and remember this choice".to_string()),
+                actions: accept_and_remember_actions,
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+            SelectionItem {
+                name: "Cancel".to_string(),
+                description: Some("Go back without enabling full access".to_string()),
+                actions: deny_actions,
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+        ];
+
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            header: Box::new(header),
+            ..Default::default()
+        });
+    }
+
     /// Set the approval policy in the widget's config copy.
     pub(crate) fn set_approval_policy(&mut self, policy: AskForApproval) {
         self.config.approval_policy = policy;
@@ -1995,6 +2006,10 @@ impl ChatWidget {
     /// Set the sandbox policy in the widget's config copy.
     pub(crate) fn set_sandbox_policy(&mut self, policy: SandboxPolicy) {
         self.config.sandbox_policy = policy;
+    }
+
+    pub(crate) fn set_full_access_warning_acknowledged(&mut self, acknowledged: bool) {
+        self.config.notices.hide_full_access_warning = Some(acknowledged);
     }
 
     /// Set the reasoning effort in the widget's config copy.
@@ -2015,8 +2030,28 @@ impl ChatWidget {
         refresh_model_metadata(&mut self.config);
     }
 
-    pub(crate) fn add_info_message(&mut self, message: String, hint: Option<String>) {
-        self.add_to_history(history_cell::new_info_event(message, hint));
+    pub(crate) fn sync_model_providers(
+        &mut self,
+        providers: &std::collections::HashMap<String, ModelProviderInfo>,
+    ) {
+        self.config.model_providers = providers.clone();
+    }
+
+    pub(crate) fn set_index_status_line(&mut self, status: Option<String>) {
+        self.bottom_pane.set_index_status_line(status);
+        self.request_redraw();
+    }
+
+    pub(crate) fn push_bottom_view<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut BottomPane),
+    {
+        f(&mut self.bottom_pane);
+        self.request_redraw();
+    }
+
+    pub(crate) fn show_selection_view(&mut self, params: SelectionViewParams) {
+        self.bottom_pane.show_selection_view(params);
         self.request_redraw();
     }
 
@@ -2028,6 +2063,11 @@ impl ChatWidget {
     ) {
         let cell = history_cell::new_search_results(query, confidence, hits);
         self.add_boxed_history(cell);
+        self.request_redraw();
+    }
+
+    pub(crate) fn add_info_message(&mut self, message: String, hint: Option<String>) {
+        self.add_to_history(history_cell::new_info_event(message, hint));
         self.request_redraw();
     }
 
@@ -2104,6 +2144,8 @@ impl ChatWidget {
         self.add_to_history(history_cell::new_mcp_tools_output(
             &self.config,
             ev.tools,
+            ev.resources,
+            ev.resource_templates,
             &ev.auth_statuses,
         ));
     }
@@ -2319,21 +2361,14 @@ pub(crate) fn refresh_model_metadata(config: &mut Config) {
     config.model_family = family;
 
     if let Some(info) = get_model_info(&config.model_family) {
-        config.model_context_window = Some(info.context_window);
-        config.model_max_output_tokens = Some(info.max_output_tokens);
+        config.model_context_window = Some(info.context_window());
+        config.model_max_output_tokens = Some(info.max_output_tokens());
         config.model_auto_compact_token_limit = info.auto_compact_token_limit;
     } else {
         config.model_context_window = None;
         config.model_max_output_tokens = None;
         config.model_auto_compact_token_limit = None;
     }
-
-    let model_slug = if config.model.is_empty() {
-        None
-    } else {
-        Some(config.model.as_str())
-    };
-    config.include_plan_tool = plan_tool_supported(config.model_provider_id.as_str(), model_slug);
 }
 
 impl WidgetRef for &ChatWidget {

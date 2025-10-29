@@ -24,7 +24,7 @@ use codex_exec::Cli as ExecCli;
 use codex_responses_api_proxy::Args as ResponsesApiProxyArgs;
 use codex_tui::AppExitInfo;
 use codex_tui::Cli as TuiCli;
-use codex_tui::UpdateAction;
+use codex_tui::updates::UpdateAction;
 use owo_colors::OwoColorize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -55,7 +55,8 @@ use codex_core::config::ConfigOverrides;
     // The executable is sometimes invoked via a platform‑specific name like
     // `codex-x86_64-unknown-linux-musl`, but the help output should always use
     // the generic `codex` command name that users run.
-    bin_name = "codex"
+    bin_name = "codex",
+    override_usage = "codex [OPTIONS] [PROMPT]\n       codex [OPTIONS] <COMMAND> [ARGS]"
 )]
 struct MultitoolCli {
     #[clap(flatten)]
@@ -123,6 +124,10 @@ enum Subcommand {
     /// Internal: run the responses API proxy.
     #[clap(hide = true)]
     ResponsesApiProxy(ResponsesApiProxyArgs),
+
+    /// Internal: relay stdio to a Unix domain socket.
+    #[clap(hide = true, name = "stdio-to-uds")]
+    StdioToUds(StdioToUdsCommand),
 
     /// Manage the semantic index commands.
     Index(IndexCommand),
@@ -353,6 +358,13 @@ struct GenerateTsCommand {
     /// Optional path to the Prettier executable to format generated files
     #[arg(short = 'p', long = "prettier", value_name = "PRETTIER_BIN")]
     prettier: Option<PathBuf>,
+}
+
+#[derive(Debug, Parser)]
+struct StdioToUdsCommand {
+    /// Path to the Unix domain socket to connect to.
+    #[arg(value_name = "SOCKET_PATH")]
+    socket_path: PathBuf,
 }
 
 fn format_exit_messages(exit_info: AppExitInfo, color_enabled: bool) -> Vec<String> {
@@ -629,6 +641,11 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
             tokio::task::spawn_blocking(move || codex_responses_api_proxy::run_main(args))
                 .await??;
         }
+        Some(Subcommand::StdioToUds(cmd)) => {
+            let socket_path = cmd.socket_path;
+            tokio::task::spawn_blocking(move || codex_stdio_to_uds::run(socket_path.as_path()))
+                .await??;
+        }
         Some(Subcommand::GenerateTs(gen_cli)) => {
             codex_protocol_ts::generate_ts(&gen_cli.out_dir, gen_cli.prettier.as_deref())?;
         }
@@ -726,6 +743,9 @@ fn merge_resume_cli_flags(interactive: &mut TuiCli, resume_cli: TuiCli) {
     }
     if !resume_cli.images.is_empty() {
         interactive.images = resume_cli.images;
+    }
+    if !resume_cli.add_dir.is_empty() {
+        interactive.add_dir.extend(resume_cli.add_dir);
     }
     if let Some(prompt) = resume_cli.prompt {
         interactive.prompt = Some(prompt);

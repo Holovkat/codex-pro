@@ -81,13 +81,13 @@ VERSION=0.2.0  # Can also be 0.2.0-alpha.1 or any valid Rust version.
 ./codex-rs/scripts/create_github_release.sh "$VERSION"
 ```
 
-This will make a local commit on top of `main` with `version` set to `$VERSION` in `codex-rs/Cargo.toml` (note that on `main`, we leave the version as `version = "0.0.0"`).
+This will make a local commit on top of `main` with `version` set to `$VERSION` in `codex-rs/Cargo.toml` (main now tracks the released upstream version, currently `0.50.0`).
 
 This will push the commit using the tag `rust-v${VERSION}`, which in turn kicks off [the release workflow](../.github/workflows/rust-release.yml). This will create a new GitHub Release named `$VERSION`.
 
 If everything looks good in the generated GitHub Release, uncheck the **pre-release** box so it is the latest release.
 
-Create a PR to update [`Formula/c/codex.rb`](https://github.com/Homebrew/homebrew-core/blob/main/Formula/c/codex.rb) on Homebrew.
+Create a PR to update [`Cask/c/codex.rb`](https://github.com/Homebrew/homebrew-cask/blob/main/Formula/c/codex.rb) on Homebrew.
 
 ### Security & responsible AI
 

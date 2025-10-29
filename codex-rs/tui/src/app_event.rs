@@ -2,21 +2,21 @@ use std::path::PathBuf;
 
 use codex_agentic_core::index::events::IndexEvent;
 use codex_agentic_core::index::query::QueryHit;
+use codex_common::approval_presets::ApprovalPreset;
 use codex_common::model_presets::ModelPreset;
 use codex_core::config_types::ProviderKind;
+use codex_core::protocol::AskForApproval;
 use codex_core::protocol::ConversationPathResponseEvent;
 use codex_core::protocol::Event;
 use codex_core::protocol::MemoryPreviewEvent;
+use codex_core::protocol::SandboxPolicy;
+use codex_core::protocol_config_types::ReasoningEffort;
 use codex_file_search::FileMatch;
 
 use crate::bottom_pane::ApprovalRequest;
 use crate::history_cell::HistoryCell;
 use crate::index_delta::SnapshotDiff;
 use crate::index_status::IndexStatusSnapshot;
-
-use codex_core::protocol::AskForApproval;
-use codex_core::protocol::SandboxPolicy;
-use codex_core::protocol_config_types::ReasoningEffort;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CustomProviderForm {
@@ -122,9 +122,6 @@ pub(crate) enum AppEvent {
     /// Update the current reasoning effort in the running app and widget.
     UpdateReasoningEffort(Option<ReasoningEffort>),
 
-    /// Update the active model provider in the running app and widget.
-    UpdateModelProvider(String),
-
     /// Update the current model slug in the running app and widget.
     UpdateModel(String),
 
@@ -136,9 +133,12 @@ pub(crate) enum AppEvent {
 
     /// Open the reasoning selection popup after picking a model.
     OpenReasoningPopup {
-        model: String,
-        provider_id: String,
-        presets: Vec<ModelPreset>,
+        model: ModelPreset,
+    },
+
+    /// Open the confirmation prompt before enabling full access mode.
+    OpenFullAccessConfirmation {
+        preset: ApprovalPreset,
     },
 
     /// Update the current approval policy in the running app and widget.
@@ -146,6 +146,15 @@ pub(crate) enum AppEvent {
 
     /// Update the current sandbox policy in the running app and widget.
     UpdateSandboxPolicy(SandboxPolicy),
+
+    /// Update whether the full access warning prompt has been acknowledged.
+    UpdateFullAccessWarningAcknowledged(bool),
+
+    /// Persist the acknowledgement flag for the full access warning prompt.
+    PersistFullAccessWarningAcknowledged,
+
+    /// Re-open the approval presets popup.
+    OpenApprovalsPopup,
 
     /// Forwarded conversation history snapshot from the current conversation.
     ConversationHistory(ConversationPathResponseEvent),
@@ -229,6 +238,25 @@ pub(crate) enum AppEvent {
     ShowByokProviderModels {
         provider_id: String,
     },
+
+    /// Open the feedback note entry overlay after the user selects a category.
+    OpenFeedbackNote {
+        category: FeedbackCategory,
+        include_logs: bool,
+    },
+
+    /// Open the upload consent popup for feedback after selecting a category.
+    OpenFeedbackConsent {
+        category: FeedbackCategory,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FeedbackCategory {
+    BadResult,
+    GoodResult,
+    Bug,
+    Other,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
