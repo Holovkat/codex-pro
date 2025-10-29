@@ -12,6 +12,7 @@ use codex_chatgpt::apply_command::ApplyCommand;
 use codex_chatgpt::apply_command::run_apply_command;
 use codex_cli::LandlockCommand;
 use codex_cli::SeatbeltCommand;
+use codex_cli::WindowsCommand;
 use codex_cli::login::read_api_key_from_stdin;
 use codex_cli::login::run_login_status;
 use codex_cli::login::run_login_with_api_key;
@@ -214,6 +215,12 @@ struct ModelsListArgs {
     #[arg(long = "oss", default_value_t = false)]
     oss: bool,
 
+    #[arg(long = "provider", value_name = "ID")]
+    provider: Option<String>,
+
+    #[arg(long = "all", default_value_t = false)]
+    all: bool,
+
     #[clap(flatten)]
     config_overrides: CliConfigOverrides,
 
@@ -254,6 +261,9 @@ enum SandboxCommand {
     /// Run a command under Landlock+seccomp (Linux only).
     #[clap(visible_alias = "landlock")]
     Linux(LandlockCommand),
+
+    /// Run a command under Windows restricted token (Windows only).
+    Windows(WindowsCommand),
 }
 
 #[derive(Debug, Parser)]
@@ -378,8 +388,6 @@ fn run_update_action(action: UpdateAction) -> anyhow::Result<()> {
     Ok(())
 }
 
-<<<<<<< HEAD
-=======
 #[derive(Debug, Default, Parser, Clone)]
 struct FeatureToggles {
     /// Enable a feature (repeatable). Equivalent to `-c features.<name>=true`.
@@ -436,8 +444,6 @@ fn stage_str(stage: codex_core::features::Stage) -> &'static str {
         Stage::Removed => "removed",
     }
 }
-
->>>>>>> 775fbba6e (feat: return an error if unknown enabled/disabled feature (#5817))
 /// As early as possible in the process lifecycle, apply hardening measures. We
 /// skip this in debug builds to avoid interfering with debugging.
 #[ctor::ctor]
@@ -612,6 +618,17 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
                 )
                 .await?;
             }
+            SandboxCommand::Windows(mut windows_cli) => {
+                prepend_config_flags(
+                    &mut windows_cli.config_overrides,
+                    root_config_overrides.clone(),
+                );
+                codex_cli::debug_sandbox::run_command_under_windows(
+                    windows_cli,
+                    codex_linux_sandbox_exe,
+                )
+                .await?;
+            }
         },
         Some(Subcommand::HelpRecipes) => {
             run_registry_command(registry.as_ref(), &command_ctx, "help-recipes", vec![])?;
@@ -664,13 +681,20 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
         }
         Some(Subcommand::Features(FeaturesCli { sub })) => match sub {
             FeaturesSubcommand::List => {
-                let cli_kv_overrides = root_config_overrides
+                let mut cli_kv_overrides = root_config_overrides
                     .parse_overrides()
-                    .map_err(|e| anyhow::anyhow!(e))?;
+                    .map_err(anyhow::Error::msg)?;
+
+                if interactive.web_search {
+                    cli_kv_overrides.push((
+                        "features.web_search_request".to_string(),
+                        toml::Value::Boolean(true),
+                    ));
+                }
 
                 let overrides = ConfigOverrides {
                     config_profile: interactive.config_profile.clone(),
-                    tools_web_search_request: interactive.web_search.then_some(true),
+                    tools_web_search_request: None,
                     ..Default::default()
                 };
 
@@ -808,6 +832,12 @@ impl ModelsListArgs {
         let mut args = Vec::new();
         if self.oss {
             args.push("--oss".to_string());
+        }
+        if self.all {
+            args.push("--all".to_string());
+        }
+        if let Some(provider) = &self.provider {
+            args.push(format!("--provider={provider}"));
         }
         args.extend(self.config_overrides.raw_overrides.clone());
         args.extend(self.rest.clone());

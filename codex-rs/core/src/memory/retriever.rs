@@ -4,10 +4,10 @@ use std::sync::Arc;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
-use fastembed::TextEmbedding;
 use tokio::sync::Mutex;
 
 use super::MemoryRuntime;
+use super::distill::EmbedderSlot;
 use super::store::GlobalMemoryStore;
 use super::types::MemoryHit;
 use super::types::MemoryPreviewModeExt;
@@ -20,7 +20,7 @@ const DEFAULT_MAX_RESULTS: usize = 5;
 pub struct MemoryRetriever {
     store: Arc<Mutex<GlobalMemoryStore>>,
     settings: Arc<super::settings::MemorySettingsManager>,
-    embedder: Arc<Mutex<TextEmbedding>>,
+    embedder: EmbedderSlot,
 }
 
 impl MemoryRetriever {
@@ -28,7 +28,7 @@ impl MemoryRetriever {
         Self {
             store: Arc::clone(&runtime.store),
             settings: Arc::clone(&runtime.settings),
-            embedder: Arc::clone(&runtime.embedder),
+            embedder: runtime.embedder.clone(),
         }
     }
 
@@ -42,8 +42,18 @@ impl MemoryRetriever {
         if !settings.enabled || query.is_empty() {
             return Ok(MemoryRetrieval::new(settings, Vec::new()));
         }
+        let embedder_arc = match super::distill::get_embedder(&self.embedder).await {
+            Ok(embedder) => embedder,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "memory embedder unavailable during retrieval; returning no hits"
+                );
+                return Ok(MemoryRetrieval::new(settings, Vec::new()));
+            }
+        };
         let embedding = {
-            let mut embedder = self.embedder.lock().await;
+            let mut embedder = embedder_arc.lock().await;
             let embeddings = embedder
                 .embed(vec![query.to_string()], None)
                 .map_err(|err| anyhow!("failed to embed memory query: {err}"))?;
@@ -170,6 +180,7 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::sync::Mutex;
+    use tokio::sync::OnceCell;
 
     async fn build_runtime(root: &TempDir) -> MemoryRuntime {
         let store = Arc::new(Mutex::new(
@@ -187,12 +198,15 @@ mod tests {
                 .await
                 .expect("load model"),
         );
-        let embedder = Arc::new(Mutex::new(
-            TextEmbedding::try_new(
-                TextInitOptions::default().with_cache_dir(root.path().join("fastembed-cache")),
-            )
-            .expect("init embedder"),
-        ));
+        let embedder = Arc::new(OnceCell::new());
+        embedder
+            .set(Arc::new(Mutex::new(
+                TextEmbedding::try_new(
+                    TextInitOptions::default().with_cache_dir(root.path().join("fastembed-cache")),
+                )
+                .expect("init embedder"),
+            )))
+            .expect("set embedder");
         MemoryRuntime {
             store,
             settings,

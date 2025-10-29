@@ -36,8 +36,6 @@ use codex_core::protocol::Event;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::Op;
 use codex_core::protocol::SessionSource;
-use codex_core::protocol::TaskCompleteEvent;
-use codex_ollama::DEFAULT_OSS_MODEL;
 use codex_protocol::config_types::SandboxMode;
 use codex_protocol::user_input::UserInput;
 use event_processor_with_human_output::EventProcessorWithHumanOutput;
@@ -188,8 +186,9 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         model_provider: resolution.provider_override.clone(),
         codex_linux_sandbox_exe,
         base_instructions: Some(base_prompt.clone()),
+        developer_instructions: None,
+        compact_prompt: None,
         include_apply_patch_tool: None,
-        include_view_image_tool: None,
         show_raw_agent_reasoning: oss_active.then_some(true),
         tools_web_search_request: None,
         experimental_sandbox_command_assessment: None,

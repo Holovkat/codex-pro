@@ -117,6 +117,7 @@ impl ToolHandler for MemoryFetchHandler {
 
         Ok(ToolOutput::Function {
             content: output,
+            content_items: None,
             success: Some(true),
         })
     }

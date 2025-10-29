@@ -237,6 +237,7 @@ mod tests {
             call_id: "call-1".to_string(),
             output: FunctionCallOutputPayload {
                 success: Some(true),
+                content_items: None,
                 content: "ok".to_string(),
             },
         };

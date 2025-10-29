@@ -109,7 +109,7 @@ use std::io::Write as _;
 // (tests access modules directly within the crate)
 
 pub async fn run_main(
-    cli: Cli,
+    mut cli: Cli,
     codex_linux_sandbox_exe: Option<PathBuf>,
 ) -> std::io::Result<AppExitInfo> {
     let mut settings = init_global_settings(load_settings());
@@ -131,6 +131,12 @@ pub async fn run_main(
             cli.approval_policy.map(Into::into),
         )
     };
+
+    if cli.web_search {
+        cli.config_overrides
+            .raw_overrides
+            .push("features.web_search_request=true".to_string());
+    }
 
     let resolution = codex_agentic_core::provider::resolve_model_provider(
         codex_agentic_core::provider::ResolveModelProviderArgs::new(&settings)
@@ -173,10 +179,11 @@ pub async fn run_main(
         config_profile: cli.config_profile.clone(),
         codex_linux_sandbox_exe,
         base_instructions: Some(base_prompt.clone()),
+        developer_instructions: None,
+        compact_prompt: None,
         include_apply_patch_tool: None,
-        include_view_image_tool: None,
         show_raw_agent_reasoning: oss_active.then_some(true),
-        tools_web_search_request: cli.web_search.then_some(true),
+        tools_web_search_request: None,
         experimental_sandbox_command_assessment: None,
         additional_writable_roots: additional_dirs,
     };
@@ -674,14 +681,6 @@ fn determine_repo_trust_state(
         Ok(true)
     }
 }
-    }
-    if config.did_user_set_custom_approval_policy_or_sandbox_mode {
-        // Respect explicit approval/sandbox overrides made by the user.
-        return false;
-    }
-    // otherwise, skip iff the active project is trusted
-    !config.active_project.is_trusted()
-}
 
 fn should_show_onboarding(
     login_status: LoginStatus,
@@ -730,13 +729,7 @@ mod tests {
         config.active_project = ProjectConfig { trust_level: None };
 
         let config_toml = ConfigToml::default();
-        let should_show = determine_repo_trust_state(
-            &mut config,
-            &config_toml,
-            None,
-            None,
-            None,
-        )?;
+        let should_show = determine_repo_trust_state(&mut config, &config_toml, None, None, None)?;
         if cfg!(target_os = "windows") {
             assert!(
                 !should_show,

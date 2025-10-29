@@ -199,9 +199,10 @@ impl RuntimeState {
         registry: Arc<CommandRegistry>,
         base_ctx: CommandContext,
     ) -> Self {
+        let session_source = options.session_source.clone();
         let conversation_manager = Arc::new(ConversationManager::new(
             Arc::clone(&options.auth_manager),
-            options.session_source,
+            session_source,
         ));
         Self {
             options,
@@ -1584,7 +1585,7 @@ fn format_mcp_tools_output(config: &Config, event: &McpListToolsResponseEvent) -
                 lines.push("    • Transport: stdio".to_string());
                 lines.push(format!("    • Command: {cmd}"));
 
-                if let Some(env) = env {
+                if let Some(env) = env.as_ref() {
                     if env.is_empty() {
                         lines.push("    • Env: <none>".to_string());
                     } else {

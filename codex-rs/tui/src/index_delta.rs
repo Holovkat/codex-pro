@@ -78,16 +78,21 @@ impl SnapshotDiff {
 
 pub(crate) fn spawn_delta_monitor(root: PathBuf, sender: AppEventSender, interval: Duration) {
     tokio::spawn(async move {
-        let mut snapshot = capture_snapshot(root.clone()).await.unwrap_or_default();
+        tokio::time::sleep(interval).await;
+        let mut snapshot: Option<FileSnapshot> = None;
         let mut ticker = tokio::time::interval(interval);
         loop {
             ticker.tick().await;
             match capture_snapshot(root.clone()).await {
                 Ok(next) => {
-                    let diff = snapshot.diff(&next);
-                    if diff.has_changes() {
-                        snapshot = next;
-                        sender.send(AppEvent::IndexDeltaDetected(diff));
+                    if let Some(current) = snapshot.as_mut() {
+                        let diff = current.diff(&next);
+                        if diff.has_changes() {
+                            *current = next;
+                            sender.send(AppEvent::IndexDeltaDetected(diff));
+                        }
+                    } else {
+                        snapshot = Some(next);
                     }
                 }
                 Err(err) => {

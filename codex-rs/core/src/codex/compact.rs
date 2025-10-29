@@ -13,7 +13,7 @@ use crate::protocol::ErrorEvent;
 use crate::protocol::EventMsg;
 use crate::protocol::TaskStartedEvent;
 use crate::protocol::TurnContextItem;
-use crate::state::TaskKind;
+use crate::protocol::WarningEvent;
 use crate::truncate::truncate_middle;
 use crate::util::backoff;
 use askama::Template;
@@ -40,9 +40,8 @@ pub(crate) async fn run_inline_auto_compact_task(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
 ) {
-    let input = vec![UserInput::Text {
-        text: SUMMARIZATION_PROMPT.to_string(),
-    }];
+    let prompt = turn_context.compact_prompt().to_string();
+    let input = vec![UserInput::Text { text: prompt }];
     run_compact_task_inner(sess, turn_context, input).await;
 }
 
@@ -170,6 +169,11 @@ async fn run_compact_task_inner(
         message: "Compact task completed".to_string(),
     });
     sess.send_event(&turn_context, event).await;
+
+    let warning = EventMsg::Warning(WarningEvent {
+        message: "Heads up: Long conversations and multiple compactions can cause the model to be less accurate. Start new a new conversation when possible to keep conversations small and targeted.".to_string(),
+    });
+    sess.send_event(&turn_context, warning).await;
 }
 
 pub fn content_items_to_text(content: &[ContentItem]) -> Option<String> {
@@ -255,11 +259,7 @@ async fn drain_to_completed(
     turn_context: &TurnContext,
     prompt: &Prompt,
 ) -> CodexResult<()> {
-    let mut stream = turn_context
-        .client
-        .clone()
-        .stream_with_task_kind(prompt, TaskKind::Compact)
-        .await?;
+    let mut stream = turn_context.client.clone().stream(prompt).await?;
     loop {
         let maybe_event = stream.next().await;
         let Some(event) = maybe_event else {
@@ -353,7 +353,8 @@ mod tests {
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
-                    text: "<user_instructions>do things</user_instructions>".to_string(),
+                    text: "# AGENTS.md instructions for project\n\n<INSTRUCTIONS>\ndo things\n</INSTRUCTIONS>"
+                        .to_string(),
                 }],
             },
             ResponseItem::Message {

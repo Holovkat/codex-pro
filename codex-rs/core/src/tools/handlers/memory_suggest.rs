@@ -83,6 +83,7 @@ impl ToolHandler for MemorySuggestHandler {
                 content: format!(
                     "No stored memories matched \"{query}\" above the configured confidence threshold."
                 ),
+                content_items: None,
                 success: Some(true),
             });
         }
@@ -91,6 +92,7 @@ impl ToolHandler for MemorySuggestHandler {
             return Ok(ToolOutput::Function {
                 content: "Memory preview mode requires user confirmation. Ask the user to review memories in the Memory Manager before continuing."
                     .to_string(),
+                content_items: None,
                 success: Some(false),
             });
         }
@@ -119,6 +121,7 @@ impl ToolHandler for MemorySuggestHandler {
 
         Ok(ToolOutput::Function {
             content: lines.join("\n"),
+            content_items: None,
             success: Some(true),
         })
     }

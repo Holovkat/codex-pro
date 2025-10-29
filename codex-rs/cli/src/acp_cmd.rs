@@ -180,7 +180,11 @@ pub async fn run(
         public_url: cli.public_url.clone(),
         initial_status: Some(initial_status),
         base_config: config.clone(),
-        auth_manager: AuthManager::shared(config.codex_home.clone(), true),
+        auth_manager: AuthManager::shared(
+            config.codex_home.clone(),
+            true,
+            config.cli_auth_credentials_store_mode,
+        ),
         session_source: SessionSource::Cli,
     };
 

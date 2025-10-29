@@ -124,7 +124,7 @@ impl MemoryPreviewModeExt for MemoryPreviewMode {
 }
 
 fn default_enabled() -> bool {
-    true
+    false
 }
 
 fn default_min_confidence() -> f32 {

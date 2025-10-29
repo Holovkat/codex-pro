@@ -6,6 +6,10 @@ use anyhow::anyhow;
 use serde_json::json;
 
 use crate::index::commands as index_commands;
+use crate::provider;
+use crate::provider::DEFAULT_OPENAI_PROVIDER_ID;
+use crate::provider::OSS_PROVIDER_ID;
+use crate::settings::CustomProvider;
 use crate::settings::Settings;
 
 /// Return value for a command invocation.
@@ -215,4 +219,190 @@ pub fn register_defaults(registry: &mut CommandRegistry) {
             })))
         },
     );
+
+    registry.register_with_descriptor(
+        "models.list",
+        Some("List cached models for providers".to_string()),
+        models_list_command,
+    );
+}
+
+fn models_list_command(ctx: &CommandContext, args: &[String]) -> Result<CommandResult> {
+    let parsed = ModelsListArgs::parse(args)?;
+    let default_provider = ctx
+        .settings
+        .model
+        .as_ref()
+        .and_then(|model| model.provider.clone())
+        .unwrap_or_else(|| DEFAULT_OPENAI_PROVIDER_ID.to_string());
+
+    let mut providers = Vec::new();
+    if parsed.all_providers {
+        providers.push(DEFAULT_OPENAI_PROVIDER_ID.to_string());
+        providers.push(OSS_PROVIDER_ID.to_string());
+        if let Some(custom) = ctx
+            .settings
+            .providers
+            .as_ref()
+            .map(|p| p.custom.keys().cloned().collect::<Vec<_>>())
+        {
+            providers.extend(custom);
+        }
+    } else if let Some(id) = parsed.provider_override {
+        providers.push(id);
+    } else {
+        providers.push(default_provider.clone());
+    }
+
+    let mut lines = Vec::new();
+    for provider_id in providers {
+        match render_provider_models(ctx, &provider_id, &default_provider) {
+            Ok(Some(output)) => lines.push(output),
+            Ok(None) => continue,
+            Err(err) => lines.push(format!(
+                "Provider `{provider_id}`: failed to load models ({err})"
+            )),
+        }
+    }
+
+    if lines.is_empty() {
+        lines.push("No models discovered for the requested provider(s).".to_string());
+    }
+
+    Ok(CommandResult::Text(lines.join("\n\n")))
+}
+
+fn render_provider_models(
+    ctx: &CommandContext,
+    provider_id: &str,
+    default_provider: &str,
+) -> Result<Option<String>> {
+    let settings = &ctx.settings;
+    let mut header = String::new();
+    let mut cached_models: Vec<String> = Vec::new();
+    let mut default_model: Option<String> = None;
+    let mut last_refresh: Option<String> = None;
+
+    match provider_id {
+        id if id == DEFAULT_OPENAI_PROVIDER_ID => {
+            header.push_str("OpenAI (built-in)");
+            if let Some(model) = settings
+                .model
+                .as_ref()
+                .and_then(|model| model.default.clone())
+            {
+                cached_models.push(model.clone());
+                default_model = Some(model);
+            }
+        }
+        id if id == OSS_PROVIDER_ID => {
+            header.push_str("Ollama (OSS)");
+            cached_models = provider::list_models_for_provider_blocking(settings, OSS_PROVIDER_ID)?;
+        }
+        other => {
+            let Some(custom) = settings.custom_provider(other) else {
+                return Ok(None);
+            };
+            header.push_str(&custom_provider_display_name(other, custom));
+            if let Some(models) = custom.cached_models.clone() {
+                cached_models = models;
+            }
+            default_model = custom.default_model.clone();
+            last_refresh = custom.last_model_refresh.clone();
+        }
+    }
+
+    let mut lines = Vec::new();
+    let is_default = provider_id == default_provider;
+    let mut header_line = if is_default {
+        format!("Provider: {header} [{provider_id}] (active)")
+    } else {
+        format!("Provider: {header} [{provider_id}]")
+    };
+    if let Some(url) = settings
+        .custom_provider(provider_id)
+        .and_then(|provider| provider.base_url.clone())
+    {
+        header_line.push_str(&format!("\n  Endpoint: {url}"));
+    } else if provider_id == OSS_PROVIDER_ID {
+        if let Some(url) = provider::provider_endpoint(settings, provider_id) {
+            header_line.push_str(&format!("\n  Endpoint: {url}"));
+        }
+    }
+    if let Some(refreshed) = last_refresh {
+        header_line.push_str(&format!("\n  Last refresh: {refreshed}"));
+    }
+    if let Some(default) = default_model.clone() {
+        header_line.push_str(&format!("\n  Default model: {default}"));
+    }
+    lines.push(header_line);
+
+    if cached_models.is_empty() {
+        lines.push("  (no cached models found)".to_string());
+    } else {
+        for model in cached_models {
+            if default_model
+                .as_ref()
+                .map(|default| default == &model)
+                .unwrap_or(false)
+            {
+                lines.push(format!("  • {model}  (default)"));
+            } else {
+                lines.push(format!("  • {model}"));
+            }
+        }
+    }
+
+    Ok(Some(lines.join("\n")))
+}
+
+fn custom_provider_display_name(id: &str, provider: &CustomProvider) -> String {
+    if provider.name.trim().is_empty() {
+        id.to_string()
+    } else {
+        provider.name.clone()
+    }
+}
+
+#[derive(Default)]
+struct ModelsListArgs {
+    provider_override: Option<String>,
+    all_providers: bool,
+}
+
+impl ModelsListArgs {
+    fn parse(args: &[String]) -> Result<Self> {
+        let mut parsed = ModelsListArgs::default();
+        let mut iter = args.iter().peekable();
+        while let Some(arg) = iter.next() {
+            match arg.as_str() {
+                "--oss" => parsed.provider_override = Some(OSS_PROVIDER_ID.to_string()),
+                "--all" => parsed.all_providers = true,
+                v if v.starts_with("--provider=") => {
+                    let id = v.trim_start_matches("--provider=").trim().to_string();
+                    if id.is_empty() {
+                        return Err(anyhow::anyhow!("--provider requires an identifier"));
+                    }
+                    parsed.provider_override = Some(id);
+                }
+                "--provider" => {
+                    let Some(id) = iter.next() else {
+                        return Err(anyhow::anyhow!("--provider requires an identifier"));
+                    };
+                    parsed.provider_override = Some(id.trim().to_string());
+                }
+                value if value.eq_ignore_ascii_case("all") => {
+                    parsed.all_providers = true;
+                }
+                value if value.starts_with('-') => {
+                    // Unknown flag; ignore so we stay forward compatible.
+                }
+                value => {
+                    parsed.provider_override = Some(value.to_string());
+                }
+            }
+        }
+
+        Ok(parsed)
+    }
 }

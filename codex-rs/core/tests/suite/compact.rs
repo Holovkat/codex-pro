@@ -8,6 +8,7 @@ use codex_core::protocol::EventMsg;
 use codex_core::protocol::Op;
 use codex_core::protocol::RolloutItem;
 use codex_core::protocol::RolloutLine;
+use codex_core::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
 use core_test_support::load_default_config_for_test;
 use core_test_support::skip_if_no_network;
@@ -45,6 +46,7 @@ const CONTEXT_LIMIT_MESSAGE: &str =
 const DUMMY_FUNCTION_NAME: &str = "unsupported_tool";
 const DUMMY_CALL_ID: &str = "call-multi-auto";
 const FUNCTION_CALL_LIMIT_MSG: &str = "function call limit push";
+pub(super) const COMPACT_WARNING_MESSAGE: &str = "Heads up: Long conversations and multiple compactions can cause the model to be less accurate. Start new a new conversation when possible to keep conversations small and targeted.";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn summarize_context_three_requests_and_instructions() {
@@ -118,6 +120,11 @@ async fn summarize_context_three_requests_and_instructions() {
 
     // 2) Summarize – second hit should include the summarization prompt.
     codex.submit(Op::Compact).await.unwrap();
+    let warning_event = wait_for_event(&codex, |ev| matches!(ev, EventMsg::Warning(_))).await;
+    let EventMsg::Warning(WarningEvent { message }) = warning_event else {
+        panic!("expected warning event after compact");
+    };
+    assert_eq!(message, COMPACT_WARNING_MESSAGE);
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
 
     // 3) Next user input – third hit; history should include only the summary.
@@ -259,6 +266,70 @@ async fn summarize_context_three_requests_and_instructions() {
         saw_compacted_summary,
         "expected a Compacted entry containing the summarizer output"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_compact_uses_custom_prompt() {
+    skip_if_no_network!();
+
+    let server = start_mock_server().await;
+    let sse_stream = sse(vec![ev_completed("r1")]);
+    mount_sse_once(&server, sse_stream).await;
+
+    let custom_prompt = "Use this compact prompt instead";
+
+    let model_provider = ModelProviderInfo {
+        base_url: Some(format!("{}/v1", server.uri())),
+        ..built_in_model_providers()["openai"].clone()
+    };
+    let home = TempDir::new().unwrap();
+    let mut config = load_default_config_for_test(&home);
+    config.model_provider = model_provider;
+    config.compact_prompt = Some(custom_prompt.to_string());
+
+    let conversation_manager = ConversationManager::with_auth(CodexAuth::from_api_key("dummy"));
+    let codex = conversation_manager
+        .new_conversation(config)
+        .await
+        .expect("create conversation")
+        .conversation;
+
+    codex.submit(Op::Compact).await.expect("trigger compact");
+    let warning_event = wait_for_event(&codex, |ev| matches!(ev, EventMsg::Warning(_))).await;
+    let EventMsg::Warning(WarningEvent { message }) = warning_event else {
+        panic!("expected warning event after compact");
+    };
+    assert_eq!(message, COMPACT_WARNING_MESSAGE);
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    let requests = server.received_requests().await.expect("collect requests");
+    let body = requests
+        .iter()
+        .find_map(|req| req.body_json::<serde_json::Value>().ok())
+        .expect("summary request body");
+
+    let input = body
+        .get("input")
+        .and_then(|v| v.as_array())
+        .expect("input array");
+    let mut found_custom_prompt = false;
+    let mut found_default_prompt = false;
+
+    for item in input {
+        if item["type"].as_str() != Some("message") {
+            continue;
+        }
+        let text = item["content"][0]["text"].as_str().unwrap_or_default();
+        if text == custom_prompt {
+            found_custom_prompt = true;
+        }
+        if text == SUMMARIZATION_PROMPT {
+            found_default_prompt = true;
+        }
+    }
+
+    assert!(found_custom_prompt, "custom prompt should be injected");
+    assert!(!found_default_prompt, "default prompt should be replaced");
 }
 
 // Windows CI only: bump to 4 workers to prevent SSE/event starvation and test timeouts.
@@ -694,6 +765,11 @@ async fn manual_compact_retries_after_context_window_error() {
         "background event should mention trimmed item count: {}",
         event.message
     );
+    let warning_event = wait_for_event(&codex, |ev| matches!(ev, EventMsg::Warning(_))).await;
+    let EventMsg::Warning(WarningEvent { message }) = warning_event else {
+        panic!("expected warning event after compact");
+    };
+    assert_eq!(message, COMPACT_WARNING_MESSAGE);
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
 
     let requests = request_log.requests();

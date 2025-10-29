@@ -9,9 +9,11 @@ use anyhow::anyhow;
 use fastembed::TextEmbedding;
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
+use tokio::sync::OnceCell;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::{self};
+use tokio::task;
 use tokio::task::JoinHandle;
 use tracing::info;
 use tracing::warn;
@@ -29,6 +31,22 @@ use super::types::MemoryRecord;
 use super::types::MemoryRecordUpdate;
 use super::types::MemorySource;
 use super::types::clean_summary;
+
+pub type EmbedderSlot = Arc<OnceCell<Arc<Mutex<TextEmbedding>>>>;
+
+pub async fn get_embedder(slot: &EmbedderSlot) -> Result<Arc<Mutex<TextEmbedding>>> {
+    let embedder = slot
+        .get_or_try_init(|| async {
+            task::spawn_blocking(|| TextEmbedding::try_new(Default::default()))
+                .await
+                .map_err(|err| anyhow!("embedder join error: {err}"))?
+                .map(|embedder| Arc::new(Mutex::new(embedder)))
+                .map_err(|err| anyhow!("failed to init embedder: {err}"))
+        })
+        .await?;
+    info!("memory embedder ready");
+    Ok(Arc::clone(embedder))
+}
 
 #[derive(Debug)]
 enum DistillerHandle {
@@ -52,7 +70,7 @@ pub struct MemoryRuntime {
     pub store: Arc<Mutex<GlobalMemoryStore>>,
     pub settings: Arc<MemorySettingsManager>,
     pub model: Arc<MiniCpmManager>,
-    pub embedder: Arc<Mutex<TextEmbedding>>,
+    pub embedder: EmbedderSlot,
 }
 
 #[derive(Debug)]
@@ -67,7 +85,8 @@ pub struct MemoryDistiller {
 struct WorkerContext {
     store: Arc<Mutex<GlobalMemoryStore>>,
     model: Arc<MiniCpmManager>,
-    embedder: Arc<Mutex<TextEmbedding>>,
+    settings: Arc<MemorySettingsManager>,
+    embedder: EmbedderSlot,
 }
 
 impl MemoryDistiller {
@@ -76,10 +95,8 @@ impl MemoryDistiller {
         let settings = Arc::new(MemorySettingsManager::load(root.clone()).await?);
         let current_settings = settings.get().await;
         let model = Arc::new(MiniCpmManager::load(root.clone()).await?);
+        let embedder: EmbedderSlot = Arc::new(OnceCell::new());
         if !current_settings.enabled {
-            let embedder = Arc::new(Mutex::new(
-                TextEmbedding::try_new(Default::default()).context("initialize fastembed model")?,
-            ));
             return Ok((
                 MemoryDistiller::noop(),
                 MemoryRuntime {
@@ -93,13 +110,10 @@ impl MemoryDistiller {
 
         ensure_model_cache(&model).await;
 
-        let embedder = Arc::new(Mutex::new(
-            TextEmbedding::try_new(Default::default()).context("initialize fastembed model")?,
-        ));
-
         let context = Arc::new(WorkerContext {
             store: store.clone(),
             model: model.clone(),
+            settings: settings.clone(),
             embedder: embedder.clone(),
         });
 
@@ -187,8 +201,18 @@ async fn process_event(context: Arc<WorkerContext>, event: MemoryEvent) -> Resul
         .await
         .context("summarise memory event")?;
     let summary_text = clean_summary(&summary.text);
+    if !context.settings.get().await.enabled {
+        return Ok(());
+    }
+    let embedder_arc = match get_embedder(&context.embedder).await {
+        Ok(embedder) => embedder,
+        Err(err) => {
+            warn!("memory embedder unavailable; dropping event: {err:#}");
+            return Ok(());
+        }
+    };
     let embedding = {
-        let mut embedder = context.embedder.lock().await;
+        let mut embedder = embedder_arc.lock().await;
         let embeddings = embedder
             .embed(vec![summary_text.clone()], None)
             .map_err(|err| anyhow!("failed to compute embeddings: {err}"))?;
@@ -255,9 +279,7 @@ impl MemoryRuntime {
         if current_settings.enabled {
             ensure_model_cache(&model).await;
         }
-        let embedder = Arc::new(Mutex::new(
-            TextEmbedding::try_new(Default::default()).context("initialize fastembed model")?,
-        ));
+        let embedder: EmbedderSlot = Arc::new(OnceCell::new());
         Ok(Self {
             store,
             settings,
@@ -359,7 +381,8 @@ impl MemoryRuntime {
                 "memory runtime is disabled; run `codex memory enable` to turn it back on"
             ));
         }
-        let mut embedder = self.embedder.lock().await;
+        let embedder_arc = get_embedder(&self.embedder).await?;
+        let mut embedder = embedder_arc.lock().await;
         let embeddings = embedder
             .embed(vec![text.to_string()], None)
             .map_err(|err| anyhow!("failed to compute embedding: {err}"))?;

@@ -4,6 +4,10 @@ use crate::app_event_sender::AppEventSender;
 use crate::test_backend::VT100Backend;
 use crate::tui::FrameRequester;
 use assert_matches::assert_matches;
+use codex_agentic_core::merge_custom_providers_into_config;
+use codex_agentic_core::settings;
+use codex_agentic_core::settings::CustomProvider;
+use codex_agentic_core::settings::Settings;
 use codex_common::approval_presets::builtin_approval_presets;
 use codex_core::AuthManager;
 use codex_core::CodexAuth;
@@ -11,6 +15,7 @@ use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::ConfigToml;
 use codex_core::config::OPENAI_DEFAULT_MODEL;
+use codex_core::config_types::ProviderKind;
 use codex_core::protocol::AgentMessageDeltaEvent;
 use codex_core::protocol::AgentMessageEvent;
 use codex_core::protocol::AgentReasoningDeltaEvent;
@@ -279,6 +284,7 @@ fn make_chatwidget_manual() -> (
     tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
     tokio::sync::mpsc::UnboundedReceiver<Op>,
 ) {
+    settings::init_global(Settings::default());
     let (tx_raw, rx) = unbounded_channel::<AppEvent>();
     let app_event_tx = AppEventSender::new(tx_raw);
     let (op_tx, op_rx) = unbounded_channel::<Op>();
@@ -874,10 +880,28 @@ fn slash_init_skips_when_project_doc_exists() {
 }
 
 #[test]
+fn slash_quit_requests_exit() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
+
+    chat.dispatch_command(SlashCommand::Quit, None);
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::ExitRequest));
+}
+
+#[test]
+fn slash_exit_requests_exit() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
+
+    chat.dispatch_command(SlashCommand::Exit, None);
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::ExitRequest));
+}
+
+#[test]
 fn slash_undo_sends_op() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
 
-    chat.dispatch_command(SlashCommand::Undo);
+    chat.dispatch_command(SlashCommand::Undo, None);
 
     match rx.try_recv() {
         Ok(AppEvent::CodexOp(Op::Undo)) => {}
@@ -1376,6 +1400,46 @@ fn model_reasoning_selection_popup_snapshot() {
 }
 
 #[test]
+fn model_popup_lists_custom_provider_models() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
+
+    let mut custom_settings = Settings::default();
+    let mut provider = CustomProvider::default();
+    provider.name = "z.ai".to_string();
+    provider.provider_kind = ProviderKind::AnthropicClaude;
+    provider.base_url = Some("https://api.z.ai".to_string());
+    provider.default_model = Some("glm-4.5".to_string());
+    provider.cached_models = Some(vec![
+        "glm-4.5".to_string(),
+        "glm-4.5-air".to_string(),
+        "glm-4.6".to_string(),
+    ]);
+    custom_settings
+        .custom_providers_mut()
+        .insert("zai".to_string(), provider);
+
+    settings::init_global(custom_settings.clone());
+    merge_custom_providers_into_config(&mut chat.config, &custom_settings);
+
+    if let Some(info) = chat.config.model_providers.get("zai").cloned() {
+        chat.set_model_provider("zai", &info);
+    }
+    chat.set_model("glm-4.5");
+
+    chat.open_model_popup();
+
+    let popup = render_bottom_popup(&chat, 80);
+    assert!(
+        popup.contains("glm-4.5 (z.ai)"),
+        "expected BYOK default model to appear, popup: {popup}"
+    );
+    assert!(
+        popup.contains("glm-4.5-air (z.ai)") && popup.contains("glm-4.6 (z.ai)"),
+        "expected additional BYOK models to appear, popup: {popup}"
+    );
+}
+
+#[test]
 fn feedback_selection_popup_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
 
@@ -1570,7 +1634,8 @@ async fn binary_size_transcript_snapshot() {
                             }
                             has_emitted_history = true;
                             transcript.push_str(&lines_to_single_string(&lines));
-                            crate::insert_history::insert_history_lines(&mut terminal, lines);
+                            crate::insert_history::insert_history_lines(&mut terminal, lines)
+                                .expect("Failed to insert history lines in test");
                         }
                     }
                 }
@@ -1591,7 +1656,8 @@ async fn binary_size_transcript_snapshot() {
                             }
                             has_emitted_history = true;
                             transcript.push_str(&lines_to_single_string(&lines));
-                            crate::insert_history::insert_history_lines(&mut terminal, lines);
+                            crate::insert_history::insert_history_lines(&mut terminal, lines)
+                                .expect("Failed to insert history lines in test");
                         }
                     }
                 }
@@ -2649,7 +2715,8 @@ fn chatwidget_exec_and_status_layout_vt100_snapshot() {
     term.set_viewport_area(viewport);
 
     for lines in drain_insert_history(&mut rx) {
-        crate::insert_history::insert_history_lines(&mut term, lines);
+        crate::insert_history::insert_history_lines(&mut term, lines)
+            .expect("Failed to insert history lines in test");
     }
 
     term.draw(|f| {
@@ -2726,7 +2793,8 @@ printf 'fenced within fenced\n'
             while let Ok(app_ev) = rx.try_recv() {
                 if let AppEvent::InsertHistoryCell(cell) = app_ev {
                     let lines = cell.display_lines(width);
-                    crate::insert_history::insert_history_lines(&mut term, lines);
+                    crate::insert_history::insert_history_lines(&mut term, lines)
+                        .expect("Failed to insert history lines in test");
                     inserted_any = true;
                 }
             }
@@ -2744,7 +2812,8 @@ printf 'fenced within fenced\n'
         }),
     });
     for lines in drain_insert_history(&mut rx) {
-        crate::insert_history::insert_history_lines(&mut term, lines);
+        crate::insert_history::insert_history_lines(&mut term, lines)
+            .expect("Failed to insert history lines in test");
     }
 
     assert_snapshot!(term.backend().vt100().screen().contents());

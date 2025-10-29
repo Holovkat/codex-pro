@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use chrono::DateTime;
+use chrono::Duration as ChronoDuration;
+use chrono::Local;
 use chrono::Utc;
 use codex_app_server_protocol::AuthMode;
 use codex_otel::otel_event_manager::OtelEventManager;
@@ -14,6 +16,7 @@ use codex_protocol::config_types::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::SessionSource;
 use eventsource_stream::Eventsource;
 use futures::prelude::*;
 use regex_lite::Regex;
@@ -57,7 +60,6 @@ use crate::openai_model_info::get_model_info;
 use crate::protocol::RateLimitSnapshot;
 use crate::protocol::RateLimitWindow;
 use crate::protocol::TokenUsage;
-use crate::state::TaskKind;
 use crate::token_data::PlanType;
 use crate::tools::spec::create_tools_json_for_responses_api;
 use crate::util::backoff;
@@ -100,8 +102,10 @@ pub struct ModelClient {
     conversation_id: ConversationId,
     effort: Option<ReasoningEffortConfig>,
     summary: ReasoningSummaryConfig,
+    session_source: SessionSource,
 }
 
+#[allow(clippy::too_many_arguments)]
 impl ModelClient {
     pub fn new(
         config: Arc<Config>,
@@ -111,6 +115,7 @@ impl ModelClient {
         effort: Option<ReasoningEffortConfig>,
         summary: ReasoningSummaryConfig,
         conversation_id: ConversationId,
+        session_source: SessionSource,
     ) -> Self {
         let client = create_client();
 
@@ -123,6 +128,7 @@ impl ModelClient {
             conversation_id,
             effort,
             summary,
+            session_source,
         }
     }
 
@@ -140,13 +146,6 @@ impl ModelClient {
         })
     }
 
-    /// Dispatches to either the Responses or Chat implementation depending on
-    /// the provider config.  Public callers always invoke `stream()` – the
-    /// specialised helpers are private to avoid accidental misuse.
-    pub async fn stream(&self, prompt: &Prompt) -> Result<ResponseStream> {
-        self.stream_with_task_kind(prompt, TaskKind::Regular).await
-    }
-
     pub fn config(&self) -> Arc<Config> {
         Arc::clone(&self.config)
     }
@@ -155,14 +154,17 @@ impl ModelClient {
         &self.provider
     }
 
-    pub(crate) async fn stream_with_task_kind(
-        &self,
-        prompt: &Prompt,
-        task_kind: TaskKind,
-    ) -> Result<ResponseStream> {
+    pub async fn stream(&self, prompt: &Prompt) -> Result<ResponseStream> {
         match self.provider.wire_api {
-            WireApi::Responses => self.stream_responses(prompt, task_kind).await,
+            WireApi::Responses => self.stream_responses(prompt).await,
             WireApi::Chat => {
+                let auth = self.auth_manager.as_ref().and_then(|manager| {
+                    manager.auth_for_provider(
+                        &self.config.model_provider_id,
+                        self.provider.requires_openai_auth,
+                    )
+                });
+
                 // Create the raw streaming connection first.
                 let response_stream = stream_chat_completions(
                     prompt,
@@ -170,6 +172,8 @@ impl ModelClient {
                     &self.client,
                     &self.provider,
                     &self.otel_event_manager,
+                    &self.session_source,
+                    auth,
                 )
                 .await?;
 
@@ -202,11 +206,7 @@ impl ModelClient {
     }
 
     /// Implementation for the OpenAI *Responses* experimental API.
-    async fn stream_responses(
-        &self,
-        prompt: &Prompt,
-        task_kind: TaskKind,
-    ) -> Result<ResponseStream> {
+    async fn stream_responses(&self, prompt: &Prompt) -> Result<ResponseStream> {
         if let Some(path) = &*CODEX_RS_SSE_FIXTURE {
             // short circuit for tests
             warn!(path, "Streaming from fixture");
@@ -272,10 +272,12 @@ impl ModelClient {
         let verbosity = if self.config.model_family.support_verbosity {
             self.config.model_verbosity
         } else {
-            warn!(
-                "model_verbosity is set but ignored as the model does not support verbosity: {}",
-                self.config.model_family.family
-            );
+            if self.config.model_verbosity.is_some() {
+                warn!(
+                    "model_verbosity is set but ignored as the model does not support verbosity: {}",
+                    self.config.model_family.family
+                );
+            }
             None
         };
 
@@ -314,7 +316,7 @@ impl ModelClient {
         let max_attempts = self.provider.request_max_retries();
         for attempt in 0..=max_attempts {
             match self
-                .attempt_stream_responses(attempt, &payload_json, &auth_manager, task_kind)
+                .attempt_stream_responses(attempt, &payload_json, &auth_manager)
                 .await
             {
                 Ok(stream) => {
@@ -342,7 +344,6 @@ impl ModelClient {
         attempt: u64,
         payload_json: &Value,
         auth_manager: &Option<Arc<AuthManager>>,
-        task_kind: TaskKind,
     ) -> std::result::Result<ResponseStream, StreamAttemptError> {
         // Always fetch the latest auth in case a prior attempt refreshed the token.
         let auth = auth_manager.as_ref().and_then(|manager| {
@@ -365,12 +366,24 @@ impl ModelClient {
             .await
             .map_err(StreamAttemptError::Fatal)?;
 
+        // Include subagent header only for subagent sessions.
+        if let SessionSource::SubAgent(sub) = &self.session_source {
+            let subagent = if let crate::protocol::SubAgentSource::Other(label) = sub {
+                label.clone()
+            } else {
+                serde_json::to_value(sub)
+                    .ok()
+                    .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+                    .unwrap_or_else(|| "other".to_string())
+            };
+            req_builder = req_builder.header("x-openai-subagent", subagent);
+        }
+
         req_builder = req_builder
             // Send session_id for compatibility.
             .header("conversation_id", self.conversation_id.to_string())
             .header("session_id", self.conversation_id.to_string())
             .header(reqwest::header::ACCEPT, "text/event-stream")
-            .header("Codex-Task-Type", task_kind.header_value())
             .json(payload_json);
 
         if let Some(auth) = auth.as_ref()
@@ -511,6 +524,10 @@ impl ModelClient {
 
     pub fn get_otel_event_manager(&self) -> OtelEventManager {
         self.otel_event_manager.clone()
+    }
+
+    pub fn get_session_source(&self) -> SessionSource {
+        self.session_source.clone()
     }
 
     /// Returns the currently configured model slug.
@@ -883,9 +900,19 @@ async fn process_sse<S>(
                                 if is_context_window_error(&error) {
                                     response_error = Some(CodexErr::ContextWindowExceeded);
                                 } else {
-                                    let delay = try_parse_retry_after(&error);
-                                    let message = error.message.clone().unwrap_or_default();
-                                    response_error = Some(CodexErr::Stream(message, delay));
+                                    let mut message =
+                                        error.message.clone().unwrap_or_default();
+                                    let delay = if let Some(delay) =
+                                        try_parse_retry_after(&error)
+                                    {
+                                        message =
+                                            augment_rate_limit_message(message, delay);
+                                        Some(delay)
+                                    } else {
+                                        None
+                                    };
+                                    response_error =
+                                        Some(CodexErr::Stream(message, delay));
                                 }
                             }
                             Err(e) => {
@@ -981,8 +1008,10 @@ async fn stream_from_fixture(
 fn rate_limit_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
 
+    // Match both OpenAI-style messages like "Please try again in 1.898s"
+    // and Azure OpenAI-style messages like "Try again in 35 seconds".
     #[expect(clippy::unwrap_used)]
-    RE.get_or_init(|| Regex::new(r"Please try again in (\d+(?:\.\d+)?)(s|ms)").unwrap())
+    RE.get_or_init(|| Regex::new(r"(?i)try again in\s*(\d+(?:\.\d+)?)\s*(s|ms|seconds?)").unwrap())
 }
 
 fn try_parse_retry_after(err: &Error) -> Option<Duration> {
@@ -990,7 +1019,7 @@ fn try_parse_retry_after(err: &Error) -> Option<Duration> {
         return None;
     }
 
-    // parse the Please try again in 1.898s format using regex
+    // parse retry hints like "try again in 1.898s" or "Try again in 35 seconds"
     let re = rate_limit_regex();
     if let Some(message) = &err.message
         && let Some(captures) = re.captures(message)
@@ -1000,9 +1029,9 @@ fn try_parse_retry_after(err: &Error) -> Option<Duration> {
 
         if let (Some(value), Some(unit)) = (seconds, unit) {
             let value = value.as_str().parse::<f64>().ok()?;
-            let unit = unit.as_str();
+            let unit = unit.as_str().to_ascii_lowercase();
 
-            if unit == "s" {
+            if unit == "s" || unit.starts_with("second") {
                 return Some(Duration::from_secs_f64(value));
             } else if unit == "ms" {
                 return Some(Duration::from_millis(value as u64));
@@ -1010,6 +1039,18 @@ fn try_parse_retry_after(err: &Error) -> Option<Duration> {
         }
     }
     None
+}
+
+fn augment_rate_limit_message(mut message: String, delay: Duration) -> String {
+    if let Ok(delta) = ChronoDuration::from_std(delay) {
+        let retry_at = Utc::now() + delta;
+        let retry_local = retry_at.with_timezone(&Local);
+        let formatted = retry_local.format("%Y-%m-%d %H:%M:%S %Z");
+        if !message.contains("Retry after") {
+            message.push_str(&format!("\nRetry after {formatted}"));
+        }
+    }
+    message
 }
 
 fn is_context_window_error(error: &Error) -> bool {
@@ -1477,6 +1518,19 @@ mod tests {
     }
 
     #[test]
+    fn test_try_parse_retry_after_azure() {
+        let err = Error {
+            r#type: None,
+            message: Some("Rate limit exceeded. Try again in 35 seconds.".to_string()),
+            code: Some("rate_limit_exceeded".to_string()),
+            plan_type: None,
+            resets_at: None,
+        };
+        let delay = try_parse_retry_after(&err);
+        assert_eq!(delay, Some(Duration::from_secs(35)));
+    }
+
+    #[test]
     fn test_try_parse_retry_after_no_delay() {
         let err = Error {
             r#type: None,
@@ -1487,6 +1541,13 @@ mod tests {
         };
         let delay = try_parse_retry_after(&err);
         assert_eq!(delay, Some(Duration::from_secs_f64(1.898)));
+    }
+
+    #[test]
+    fn test_augment_rate_limit_message_appends_timestamp() {
+        let message = "Rate limit reached. Please try again in 1s.".to_string();
+        let augmented = augment_rate_limit_message(message, Duration::from_secs(1));
+        assert!(augmented.contains("Retry after"));
     }
 
     #[test]

@@ -196,6 +196,7 @@ async fn run_codex_tool_session_inner(
                         .await;
                         continue;
                     }
+                    EventMsg::Warning(_) => continue,
                     EventMsg::Error(err_event) => {
                         // Return a response to conclude the tool call when the Codex session reports an error (e.g., interruption).
                         let result = json!({
@@ -253,6 +254,11 @@ async fn run_codex_tool_session_inner(
                         // TODO: think how we want to support this in the MCP
                     }
                     EventMsg::AgentReasoningDelta(_) => {
+                        // TODO: think how we want to support this in the MCP
+                    }
+                    EventMsg::AgentMessageContentDelta(_)
+                    | EventMsg::ReasoningContentDelta(_)
+                    | EventMsg::ReasoningRawContentDelta(_) => {
                         // TODO: think how we want to support this in the MCP
                     }
                     EventMsg::AgentMessage(AgentMessageEvent { .. }) => {

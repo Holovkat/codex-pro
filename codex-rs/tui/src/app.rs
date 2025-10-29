@@ -53,12 +53,12 @@ use codex_core::ConversationManager;
 use codex_core::WireApi;
 use codex_core::config::Config;
 use codex_core::config::OPENAI_DEFAULT_MODEL;
-use codex_core::config::persist_model_selection;
-use codex_core::config::set_hide_full_access_warning;
+use codex_core::config::edit::ConfigEditsBuilder;
 use codex_core::config_types::ProviderKind;
 use codex_core::memory::MemoryPreviewModeExt;
 use codex_core::memory::MemoryRetriever;
 use codex_core::memory::MemoryRuntime;
+use codex_core::model_family::find_family_for_model;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::SessionSource;
 use codex_core::protocol::TokenUsage;
@@ -566,6 +566,17 @@ impl App {
             memory_runtime,
         };
 
+        let initial_provider = app.config.model_provider_id.clone();
+        if !app.apply_model_provider(&initial_provider) {
+            if initial_provider != DEFAULT_OPENAI_PROVIDER_ID {
+                let _ = app.apply_model_provider(DEFAULT_OPENAI_PROVIDER_ID);
+            }
+        }
+
+        tracing::info!(
+            auto_build_index = app.settings.auto_build_index(),
+            "auto_build_index flag on startup"
+        );
         if app.settings.auto_build_index() && !app.index_manifest_exists() {
             let mut options = BuildOptions::default();
             options.project_root = app.config.cwd.clone();
@@ -577,11 +588,13 @@ impl App {
 
         spawn_status_refresh(app.app_event_tx.clone());
         spawn_toast_tick(app.app_event_tx.clone());
-        spawn_delta_monitor(
-            app.config.cwd.clone(),
-            app.app_event_tx.clone(),
-            Duration::from_secs(INDEX_DELTA_POLL_SECS),
-        );
+        if app.settings.auto_build_index() {
+            spawn_delta_monitor(
+                app.config.cwd.clone(),
+                app.app_event_tx.clone(),
+                Duration::from_secs(INDEX_DELTA_POLL_SECS),
+            );
+        }
         #[cfg(not(debug_assertions))]
         if let Some(upgrade_info) = upgrade_version {
             let update_action = crate::updates::get_update_action();
@@ -653,10 +666,22 @@ impl App {
         self.config.cwd.join(".codex/index/manifest.json").exists()
     }
 
-    fn apply_model_provider(&mut self, provider_id: &str) {
-        if self.config.model_provider_id == provider_id {
-            return;
+    fn apply_model_provider(&mut self, provider_id: &str) -> bool {
+        if let Some(custom) = self.settings.custom_provider(provider_id) {
+            if Self::custom_provider_requires_api_key(custom)
+                && !self.custom_provider_has_api_key(provider_id)
+            {
+                self.chat_widget.add_error_message(format!(
+                    "Provider `{provider_id}` is missing credentials. Run /byok and add an API key to use this model."
+                ));
+                return false;
+            }
         }
+
+        if self.config.model_provider_id == provider_id {
+            return true;
+        }
+
         if let Some(info) = self.config.model_providers.get(provider_id).cloned() {
             self.config.model_provider_id = provider_id.to_string();
             self.config.model_provider = info;
@@ -665,11 +690,33 @@ impl App {
             sanitize_tool_overrides(&mut self.config);
             self.chat_widget
                 .set_model_provider(&self.config.model_provider_id, &self.config.model_provider);
+            true
         } else {
             tracing::warn!(
                 provider_id,
                 "selected model provider not found in config when applying model preset"
             );
+            false
+        }
+    }
+
+    fn custom_provider_requires_api_key(custom: &CustomProvider) -> bool {
+        custom.provider_kind != ProviderKind::Ollama
+            && !custom.extra_headers.as_ref().map_or(false, |headers| {
+                headers
+                    .keys()
+                    .any(|key| key.eq_ignore_ascii_case("authorization"))
+            })
+    }
+
+    fn custom_provider_has_api_key(&self, provider_id: &str) -> bool {
+        match self.auth_manager.custom_provider_api_key(provider_id) {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(err) => {
+                tracing::warn!(%err, provider_id, "failed to read stored API key");
+                false
+            }
         }
     }
 
@@ -989,13 +1036,20 @@ impl App {
             AppEvent::UpdateFullAccessWarningAcknowledged(acknowledged) => {
                 self.chat_widget
                     .set_full_access_warning_acknowledged(acknowledged);
-                self.config.notices.hide_full_access_warning = Some(acknowledged);
             }
             AppEvent::PersistFullAccessWarningAcknowledged => {
-                if let Some(value) = self.config.notices.hide_full_access_warning
-                    && let Err(err) = set_hide_full_access_warning(&self.config.codex_home, value)
+                if let Err(err) = ConfigEditsBuilder::new(&self.config.codex_home)
+                    .set_hide_full_access_warning(true)
+                    .apply()
+                    .await
                 {
-                    tracing::error!("failed to persist full access warning acknowledgement: {err}");
+                    tracing::error!(
+                        error = %err,
+                        "failed to persist full access warning acknowledgement"
+                    );
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to save full access confirmation preference: {err}"
+                    ));
                 }
             }
             AppEvent::OpenApprovalsPopup => {
@@ -1049,16 +1103,21 @@ impl App {
                 self.on_update_reasoning_effort(effort);
             }
             AppEvent::OpenReasoningPopup { model } => {
-                if let Some(provider_id) = model.provider_id.as_deref() {
-                    self.apply_model_provider(provider_id);
+                let provider_ok = if let Some(provider_id) = model.provider_id.as_deref() {
+                    self.apply_model_provider(provider_id)
                 } else {
-                    self.apply_model_provider(DEFAULT_OPENAI_PROVIDER_ID);
+                    self.apply_model_provider(DEFAULT_OPENAI_PROVIDER_ID)
+                };
+                if provider_ok {
+                    self.chat_widget.open_reasoning_popup(model);
                 }
-                self.chat_widget.open_reasoning_popup(model);
             }
             AppEvent::UpdateModel(model) => {
                 self.chat_widget.set_model(&model);
-                self.config.model = model;
+                self.config.model = model.clone();
+                if let Some(family) = find_family_for_model(&model) {
+                    self.config.model_family = family;
+                }
                 refresh_model_metadata(&mut self.config);
                 sanitize_reasoning_overrides(&mut self.config);
                 sanitize_tool_overrides(&mut self.config);
@@ -1077,7 +1136,10 @@ impl App {
             }
             AppEvent::PersistModelSelection { model, effort } => {
                 let profile = self.active_profile.as_deref();
-                match persist_model_selection(&self.config.codex_home, profile, &model, effort)
+                match ConfigEditsBuilder::new(&self.config.codex_home)
+                    .with_profile(profile)
+                    .set_model(Some(model.as_str()), effort)
+                    .apply()
                     .await
                 {
                     Ok(()) => {

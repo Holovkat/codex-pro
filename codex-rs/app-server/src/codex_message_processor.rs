@@ -4,6 +4,7 @@ use crate::fuzzy_file_search::run_fuzzy_file_search;
 use crate::models::supported_models;
 use crate::outgoing_message::OutgoingMessageSender;
 use crate::outgoing_message::OutgoingNotification;
+use codex_app_server_protocol::AccountUpdatedNotification;
 use codex_app_server_protocol::AddConversationListenerParams;
 use codex_app_server_protocol::AddConversationSubscriptionResponse;
 use codex_app_server_protocol::ApplyPatchApprovalParams;
@@ -73,10 +74,8 @@ use codex_core::auth::login_with_api_key;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::ConfigToml;
-use codex_core::config::load_config_as_toml;
-use codex_core::config_edit::CONFIG_KEY_EFFORT;
-use codex_core::config_edit::CONFIG_KEY_MODEL;
-use codex_core::config_edit::persist_overrides_and_clear_if_none;
+use codex_core::config::edit::ConfigEditsBuilder;
+use codex_core::config_loader::load_config_as_toml;
 use codex_core::default_client::get_codex_user_agent;
 use codex_core::exec::ExecParams;
 use codex_core::exec_env::create_env;
@@ -202,8 +201,7 @@ impl CodexMessageProcessor {
                 request_id,
                 params: _,
             } => {
-                self.send_unimplemented_error(request_id, "account/logout")
-                    .await;
+                self.logout_v2(request_id).await;
             }
             ClientRequest::GetAccount {
                 request_id,
@@ -252,7 +250,7 @@ impl CodexMessageProcessor {
                 request_id,
                 params: _,
             } => {
-                self.logout_chatgpt(request_id).await;
+                self.logout_v1(request_id).await;
             }
             ClientRequest::GetAuthStatus { request_id, params } => {
                 self.get_auth_status(request_id, params).await;
@@ -496,9 +494,8 @@ impl CodexMessageProcessor {
         }
     }
 
-    async fn logout_chatgpt(&mut self, request_id: RequestId) {
+    async fn logout_common(&mut self) -> std::result::Result<Option<AuthMode>, JSONRPCErrorError> {
         {
-            // Cancel any active login attempt.
             let mut guard = self.active_login.lock().await;
             if let Some(active) = guard.take() {
                 active.drop();
@@ -506,31 +503,60 @@ impl CodexMessageProcessor {
         }
 
         if let Err(err) = self.auth_manager.logout() {
-            let error = JSONRPCErrorError {
+            return Err(JSONRPCErrorError {
                 code: INTERNAL_ERROR_CODE,
                 message: format!("logout failed: {err}"),
                 data: None,
-            };
-            self.outgoing.send_error(request_id, error).await;
-            return;
+            });
         }
 
-        self.outgoing
-            .send_response(
-                request_id,
-                codex_app_server_protocol::LogoutChatGptResponse {},
-            )
-            .await;
+        Ok(self.auth_manager.auth().map(|auth| auth.mode))
+    }
 
-        // Send auth status change notification reflecting the current auth mode
-        // after logout.
-        let current_auth_method = self.auth_manager.auth().map(|auth| auth.mode);
-        let payload = AuthStatusChangeNotification {
-            auth_method: current_auth_method,
-        };
-        self.outgoing
-            .send_server_notification(ServerNotification::AuthStatusChange(payload))
-            .await;
+    async fn logout_v1(&mut self, request_id: RequestId) {
+        match self.logout_common().await {
+            Ok(current_auth_method) => {
+                self.outgoing
+                    .send_response(
+                        request_id,
+                        codex_app_server_protocol::LogoutChatGptResponse {},
+                    )
+                    .await;
+
+                let payload = AuthStatusChangeNotification {
+                    auth_method: current_auth_method,
+                };
+                self.outgoing
+                    .send_server_notification(ServerNotification::AuthStatusChange(payload))
+                    .await;
+            }
+            Err(error) => {
+                self.outgoing.send_error(request_id, error).await;
+            }
+        }
+    }
+
+    async fn logout_v2(&mut self, request_id: RequestId) {
+        match self.logout_common().await {
+            Ok(current_auth_method) => {
+                self.outgoing
+                    .send_response(
+                        request_id,
+                        codex_app_server_protocol::LogoutAccountResponse {},
+                    )
+                    .await;
+
+                let payload_v2 = AccountUpdatedNotification {
+                    auth_method: current_auth_method,
+                };
+                self.outgoing
+                    .send_server_notification(ServerNotification::AccountUpdated(payload_v2))
+                    .await;
+            }
+            Err(error) => {
+                self.outgoing.send_error(request_id, error).await;
+            }
+        }
     }
 
     async fn get_auth_status(
@@ -689,19 +715,12 @@ impl CodexMessageProcessor {
             model,
             reasoning_effort,
         } = params;
-        let effort_str = reasoning_effort.map(|effort| effort.to_string());
 
-        let overrides: [(&[&str], Option<&str>); 2] = [
-            (&[CONFIG_KEY_MODEL], model.as_deref()),
-            (&[CONFIG_KEY_EFFORT], effort_str.as_deref()),
-        ];
-
-        match persist_overrides_and_clear_if_none(
-            &self.config.codex_home,
-            self.config.active_profile.as_deref(),
-            &overrides,
-        )
-        .await
+        match ConfigEditsBuilder::new(&self.config.codex_home)
+            .with_profile(self.config.active_profile.as_deref())
+            .set_model(model.as_deref(), reasoning_effort)
+            .apply()
+            .await
         {
             Ok(()) => {
                 let response = SetDefaultModelResponse {};
@@ -710,7 +729,7 @@ impl CodexMessageProcessor {
             Err(err) => {
                 let error = JSONRPCErrorError {
                     code: INTERNAL_ERROR_CODE,
-                    message: format!("failed to persist overrides: {err}"),
+                    message: format!("failed to persist model selection: {err}"),
                     data: None,
                 };
                 self.outgoing.send_error(request_id, error).await;
@@ -1769,6 +1788,8 @@ async fn derive_config_from_params(
         sandbox: sandbox_mode,
         config: cli_overrides,
         base_instructions,
+        developer_instructions,
+        compact_prompt,
         include_apply_patch_tool,
     } = params;
     let overrides = ConfigOverrides {
@@ -1781,8 +1802,9 @@ async fn derive_config_from_params(
         model_provider,
         codex_linux_sandbox_exe,
         base_instructions,
+        developer_instructions,
+        compact_prompt,
         include_apply_patch_tool,
-        include_view_image_tool: None,
         show_raw_agent_reasoning: None,
         tools_web_search_request: None,
         experimental_sandbox_command_assessment: None,
@@ -1993,7 +2015,7 @@ mod tests {
                 "role": "user",
                 "content": [{
                     "type": "input_text",
-                    "text": "<user_instructions>\n<AGENTS.md contents>\n</user_instructions>".to_string(),
+                    "text": "# AGENTS.md instructions for /\n\n<INSTRUCTIONS>\n<AGENTS.md contents>\n</INSTRUCTIONS>".to_string(),
                 }],
             }),
             json!({

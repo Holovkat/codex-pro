@@ -10,6 +10,7 @@ use std::io::BufReader;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -109,11 +110,7 @@ impl GlobalMemoryStore {
             write_all_records(&store.manifest, &store.records)?;
         }
 
-        if !store.records.is_empty() {
-            store.rebuild()?;
-        } else {
-            store.clear_index_dir()?;
-        }
+        store.ensure_index_up_to_date(removed_duplicates > 0)?;
 
         Ok(store)
     }
@@ -396,6 +393,62 @@ impl GlobalMemoryStore {
             .context("unable to write newline to memory metrics")?;
         file.flush().context("unable to flush memory metrics")?;
         Ok(())
+    }
+
+    fn ensure_index_up_to_date(&mut self, force_rebuild: bool) -> Result<()> {
+        let (graph_path, data_path) = self.index_file_paths();
+        let index_exists = graph_path.exists() && data_path.exists();
+
+        let should_rebuild = force_rebuild
+            || !index_exists
+            || self.manifest_version_newer(&graph_path, &data_path)?;
+
+        if should_rebuild {
+            if self.records.is_empty() {
+                self.clear_index_dir()?;
+                self.last_rebuild_at = Some(Utc::now());
+                return Ok(());
+            }
+            self.rebuild()?;
+        } else if let Some(index_time) = Self::index_timestamp(&graph_path, &data_path)? {
+            self.last_rebuild_at = Some(index_time);
+        }
+        Ok(())
+    }
+
+    fn index_file_paths(&self) -> (PathBuf, PathBuf) {
+        (
+            self.index_dir.join(format!("{HNSW_BASENAME}.hnsw.graph")),
+            self.index_dir.join(format!("{HNSW_BASENAME}.hnsw.data")),
+        )
+    }
+
+    fn index_timestamp(
+        graph_path: &Path,
+        data_path: &Path,
+    ) -> Result<Option<chrono::DateTime<Utc>>> {
+        let graph_time = fs::metadata(graph_path)
+            .and_then(|meta| meta.modified())
+            .ok();
+        let data_time = fs::metadata(data_path)
+            .and_then(|meta| meta.modified())
+            .ok();
+        let timestamp = graph_time
+            .into_iter()
+            .chain(data_time)
+            .min()
+            .map(|ts| chrono::DateTime::<Utc>::from(ts));
+        Ok(timestamp)
+    }
+
+    fn manifest_version_newer(&self, graph_path: &Path, data_path: &Path) -> Result<bool> {
+        let manifest_time = fs::metadata(&self.manifest)
+            .and_then(|meta| meta.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let index_time = Self::index_timestamp(graph_path, data_path)?
+            .map(|dt| dt.into())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        Ok(manifest_time > index_time)
     }
 }
 

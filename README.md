@@ -75,11 +75,12 @@ Codex CLI supports a rich set of configuration options, with preferences stored 
 
 - [**Getting started**](./docs/getting-started.md)
   - [CLI usage](./docs/getting-started.md#cli-usage)
+  - [Slash commands](./docs/slash_commands.md)
   - [Running with a prompt as input](./docs/getting-started.md#running-with-a-prompt-as-input)
   - [Example prompts](./docs/getting-started.md#example-prompts)
   - [Custom prompts](./docs/prompts.md)
   - [Memory with AGENTS.md](./docs/getting-started.md#memory-with-agentsmd)
-  - [Configuration](./docs/config.md)
+- [**Configuration**](./docs/config.md)
 - [**Memory manager & context store**](./designs/codex-pro/functional-design/23-MEMORY-MANAGER-IMPLEMENTATION.md)
   - `codex memory` CLI administration (init/list/search/create/edit/delete/rebuild/reset)
   - `/memory` TUI overlay with semantic search, confidence controls, MiniCPM status, and preview flows

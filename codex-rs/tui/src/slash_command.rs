@@ -31,7 +31,9 @@ pub enum SlashCommand {
     Mcp,
     Logout,
     Feedback,
+    Rollout,
     Quit,
+    Exit,
     Memory,
     #[cfg(debug_assertions)]
     TestApproval,
@@ -46,7 +48,7 @@ impl SlashCommand {
             SlashCommand::Compact => "summarize conversation to prevent hitting the context limit",
             SlashCommand::Review => "review my current changes and find issues",
             SlashCommand::Undo => "ask Codex to undo a turn",
-            SlashCommand::Quit => "exit Codex",
+            SlashCommand::Quit | SlashCommand::Exit => "exit Codex",
             SlashCommand::IndexBuild => "rebuild the semantic index",
             SlashCommand::SearchCode => {
                 "run semantic code search and adjust the confidence threshold"
@@ -61,6 +63,7 @@ impl SlashCommand {
             SlashCommand::Mcp => "list configured MCP tools",
             SlashCommand::Feedback => "send logs to maintainers",
             SlashCommand::Logout => "log out of Codex",
+            SlashCommand::Rollout => "print the rollout file path",
             SlashCommand::Memory => "inspect and manage global context memory",
             #[cfg(debug_assertions)]
             SlashCommand::TestApproval => "test approval request",
@@ -93,8 +96,10 @@ impl SlashCommand {
             | SlashCommand::Status
             | SlashCommand::Mcp
             | SlashCommand::Feedback
+            | SlashCommand::Rollout
             | SlashCommand::Memory
-            | SlashCommand::Quit => true,
+            | SlashCommand::Quit
+            | SlashCommand::Exit => true,
 
             #[cfg(debug_assertions)]
             SlashCommand::TestApproval => true,

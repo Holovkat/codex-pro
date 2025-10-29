@@ -8,6 +8,7 @@ use serial_test::serial;
 use std::collections::HashMap;
 use std::env;
 use std::fmt::Debug;
+use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,9 +21,12 @@ use codex_protocol::config_types::ForcedLoginMethod;
 
 pub use crate::auth::storage::AuthCredentialsStoreMode;
 pub use crate::auth::storage::AuthDotJson;
-pub use crate::auth::storage::CustomProviderAuth;
 use crate::auth::storage::AuthStorageBackend;
+pub use crate::auth::storage::CustomProviderAuth;
 use crate::auth::storage::create_auth_storage;
+pub use crate::auth::storage::get_auth_file;
+pub use crate::auth::storage::try_read_auth_json;
+pub use crate::auth::storage::write_auth_json;
 use crate::config::Config;
 use crate::default_client::CodexHttpClient;
 use crate::token_data::PlanType;
@@ -574,7 +578,11 @@ mod tests {
     #[test]
     fn custom_provider_api_key_roundtrip() {
         let dir = tempdir().unwrap();
-        let manager = AuthManager::shared(dir.path().to_path_buf(), false);
+        let manager = AuthManager::shared(
+            dir.path().to_path_buf(),
+            false,
+            AuthCredentialsStoreMode::File,
+        );
 
         assert_eq!(
             manager

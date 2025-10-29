@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use crate::CodexAuth;
 use crate::ModelProviderInfo;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
@@ -15,11 +16,14 @@ use crate::model_family::ModelFamily;
 use crate::tools::spec::create_tools_json_for_chat_completions_api;
 use crate::util::backoff;
 use bytes::Bytes;
+use codex_app_server_protocol::AuthMode;
 use codex_otel::otel_event_manager::OtelEventManager;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use eventsource_stream::Eventsource;
 use futures::Stream;
 use futures::StreamExt;
@@ -41,6 +45,8 @@ pub(crate) async fn stream_chat_completions(
     client: &CodexHttpClient,
     provider: &ModelProviderInfo,
     otel_event_manager: &OtelEventManager,
+    session_source: &SessionSource,
+    auth: Option<CodexAuth>,
 ) -> Result<ResponseStream> {
     if prompt.output_schema.is_some() {
         return Err(CodexErr::UnsupportedOperation(
@@ -334,7 +340,7 @@ pub(crate) async fn stream_chat_completions(
 
     debug!(
         "POST to {}: {}",
-        provider.get_full_url(&None),
+        provider.get_full_url(&auth),
         serde_json::to_string_pretty(&payload).unwrap_or_default()
     );
 
@@ -343,7 +349,27 @@ pub(crate) async fn stream_chat_completions(
     loop {
         attempt += 1;
 
-        let req_builder = provider.create_request_builder(client, &None).await?;
+        let mut req_builder = provider.create_request_builder(client, &auth).await?;
+
+        // Include subagent header only for subagent sessions.
+        if let SessionSource::SubAgent(sub) = session_source.clone() {
+            let subagent = if let SubAgentSource::Other(label) = sub {
+                label
+            } else {
+                serde_json::to_value(&sub)
+                    .ok()
+                    .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+                    .unwrap_or_else(|| "other".to_string())
+            };
+            req_builder = req_builder.header("x-openai-subagent", subagent);
+        }
+
+        if let Some(auth) = auth.as_ref()
+            && auth.mode == AuthMode::ChatGPT
+            && let Some(account_id) = auth.get_account_id()
+        {
+            req_builder = req_builder.header("chatgpt-account-id", account_id);
+        }
 
         let res = otel_event_manager
             .log_request(attempt, || {

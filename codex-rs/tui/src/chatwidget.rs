@@ -1,16 +1,18 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use codex_core::config::Config;
-use codex_core::config_types::Notifications;
+use codex_core::config::types::Notifications;
 use codex_core::get_model_info;
 use codex_core::git_info::current_branch_name;
 use codex_core::git_info::local_git_branches;
 use codex_core::model_family::derive_default_model_family;
 use codex_core::model_family::find_family_for_model;
 use codex_core::project_doc::DEFAULT_PROJECT_DOC_FILENAME;
+use codex_core::protocol::AgentMessageContentDeltaEvent;
 use codex_core::protocol::AgentMessageDeltaEvent;
 use codex_core::protocol::AgentMessageEvent;
 use codex_core::protocol::AgentReasoningDeltaEvent;
@@ -35,6 +37,8 @@ use codex_core::protocol::MemoryPreviewEvent;
 use codex_core::protocol::Op;
 use codex_core::protocol::PatchApplyBeginEvent;
 use codex_core::protocol::RateLimitSnapshot;
+use codex_core::protocol::ReasoningContentDeltaEvent;
+use codex_core::protocol::ReasoningRawContentDeltaEvent;
 use codex_core::protocol::ReviewRequest;
 use codex_core::protocol::StreamErrorEvent;
 use codex_core::protocol::TaskCompleteEvent;
@@ -46,6 +50,7 @@ use codex_core::protocol::UndoCompletedEvent;
 use codex_core::protocol::UndoStartedEvent;
 use codex_core::protocol::UserMessageEvent;
 use codex_core::protocol::ViewImageToolCallEvent;
+use codex_core::protocol::WarningEvent;
 use codex_core::protocol::WebSearchBeginEvent;
 use codex_core::protocol::WebSearchEndEvent;
 use codex_protocol::ConversationId;
@@ -113,16 +118,22 @@ use crate::streaming::controller::StreamController;
 use std::path::Path;
 
 use chrono::Local;
+use codex_agentic_core::provider::DEFAULT_OPENAI_PROVIDER_ID;
+use codex_agentic_core::settings;
+use codex_agentic_core::settings::CustomProvider;
 use codex_common::approval_presets::ApprovalPreset;
 use codex_common::approval_presets::builtin_approval_presets;
 use codex_common::model_presets::ModelPreset;
+use codex_common::model_presets::ReasoningEffortPreset;
 use codex_common::model_presets::builtin_model_presets;
 use codex_core::AuthManager;
 use codex_core::ConversationManager;
 use codex_core::ModelProviderInfo;
+use codex_core::config_types::ProviderKind;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
 use codex_core::protocol_config_types::ReasoningEffort as ReasoningEffortConfig;
+use codex_core::protocol_config_types::ReasoningEffort;
 use codex_file_search::FileMatch;
 use codex_protocol::plan_tool::UpdatePlanArgs;
 use strum::IntoEnumIterator;
@@ -528,6 +539,11 @@ impl ChatWidget {
         self.maybe_send_next_queued_input();
     }
 
+    fn on_warning(&mut self, message: String) {
+        self.add_to_history(history_cell::new_warning_event(message));
+        self.request_redraw();
+    }
+
     /// Handle a turn aborted due to user interrupt (Esc).
     /// When there are queued user messages, restore them into the composer
     /// separated by newlines rather than auto‑submitting the next one.
@@ -671,7 +687,7 @@ impl ChatWidget {
     }
 
     fn on_shutdown_complete(&mut self) {
-        self.app_event_tx.send(AppEvent::ExitRequest);
+        self.request_exit();
     }
 
     fn on_turn_diff(&mut self, unified_diff: String) {
@@ -1286,11 +1302,21 @@ impl ChatWidget {
             SlashCommand::MemorySuggest => {
                 self.handle_memory_suggest_command(args);
             }
+            SlashCommand::Rollout => {
+                if let Some(path) = self.current_rollout_path.as_ref() {
+                    self.add_info_message(format!("Rollout file: {}", path.display()), None);
+                } else {
+                    self.add_info_message(
+                        "No rollout file is available yet for this session.".to_string(),
+                        None,
+                    );
+                }
+            }
             SlashCommand::Byok => {
                 self.app_event_tx.send(AppEvent::OpenByokManager);
             }
-            SlashCommand::Quit => {
-                self.app_event_tx.send(AppEvent::ExitRequest);
+            SlashCommand::Quit | SlashCommand::Exit => {
+                self.request_exit();
             }
             SlashCommand::Logout => {
                 if let Err(e) = codex_core::auth::logout(
@@ -1299,7 +1325,7 @@ impl ChatWidget {
                 ) {
                     tracing::error!("failed to logout: {e}");
                 }
-                self.app_event_tx.send(AppEvent::ExitRequest);
+                self.request_exit();
             }
             SlashCommand::Undo => {
                 self.app_event_tx.send(AppEvent::CodexOp(Op::Undo));
@@ -1500,7 +1526,11 @@ impl ChatWidget {
     fn dispatch_event_msg(&mut self, id: Option<String>, msg: EventMsg, from_replay: bool) {
         match msg {
             EventMsg::AgentMessageDelta(_)
+            | EventMsg::AgentMessageContentDelta(_)
             | EventMsg::AgentReasoningDelta(_)
+            | EventMsg::ReasoningContentDelta(_)
+            | EventMsg::AgentReasoningRawContentDelta(_)
+            | EventMsg::ReasoningRawContentDelta(_)
             | EventMsg::ExecCommandOutputDelta(_) => {}
             _ => {
                 tracing::trace!("handle_codex_event: {:?}", msg);
@@ -1513,10 +1543,17 @@ impl ChatWidget {
             EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta }) => {
                 self.on_agent_message_delta(delta)
             }
+            EventMsg::AgentMessageContentDelta(AgentMessageContentDeltaEvent { delta, .. }) => {
+                self.on_agent_message_delta(delta)
+            }
             EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent { delta })
+            | EventMsg::ReasoningContentDelta(ReasoningContentDeltaEvent { delta, .. })
             | EventMsg::AgentReasoningRawContentDelta(AgentReasoningRawContentDeltaEvent {
                 delta,
-            }) => self.on_agent_reasoning_delta(delta),
+            })
+            | EventMsg::ReasoningRawContentDelta(ReasoningRawContentDeltaEvent { delta, .. }) => {
+                self.on_agent_reasoning_delta(delta)
+            }
             EventMsg::AgentReasoning(AgentReasoningEvent { .. }) => self.on_agent_reasoning_final(),
             EventMsg::AgentReasoningRawContent(AgentReasoningRawContentEvent { text }) => {
                 self.on_agent_reasoning_delta(text);
@@ -1532,6 +1569,7 @@ impl ChatWidget {
                 self.on_rate_limit_snapshot(ev.rate_limits);
             }
             EventMsg::Error(ErrorEvent { message }) => self.on_error(message),
+            EventMsg::Warning(WarningEvent { message }) => self.on_warning(message),
             EventMsg::TurnAborted(ev) => match ev.reason {
                 TurnAbortReason::Interrupted => {
                     self.on_interrupted_turn(ev.reason);
@@ -1645,6 +1683,10 @@ impl ChatWidget {
         }
     }
 
+    fn request_exit(&self) {
+        self.app_event_tx.send(AppEvent::ExitRequest);
+    }
+
     fn request_redraw(&mut self) {
         self.frame_requester.schedule_frame();
     }
@@ -1727,8 +1769,7 @@ impl ChatWidget {
     /// a second popup is shown to choose the reasoning effort.
     pub(crate) fn open_model_popup(&mut self) {
         let current_model = self.config.model.clone();
-        let auth_mode = self.auth_manager.auth().map(|auth| auth.mode);
-        let presets: Vec<ModelPreset> = builtin_model_presets(auth_mode);
+        let presets = self.collect_model_presets();
 
         let mut items: Vec<SelectionItem> = Vec::new();
         for preset in presets.into_iter() {
@@ -1764,9 +1805,124 @@ impl ChatWidget {
         });
     }
 
+    fn collect_model_presets(&self) -> Vec<ModelPreset> {
+        let auth_mode = self.auth_manager.auth().map(|auth| auth.mode);
+        let mut presets = builtin_model_presets(auth_mode);
+        presets.extend(self.custom_model_presets());
+        presets.sort_by(|lhs, rhs| {
+            let default_cmp = rhs.is_default.cmp(&lhs.is_default);
+            if default_cmp != Ordering::Equal {
+                return default_cmp;
+            }
+            let provider_cmp = lhs
+                .provider_label
+                .as_deref()
+                .unwrap_or("")
+                .cmp(rhs.provider_label.as_deref().unwrap_or(""));
+            if provider_cmp != Ordering::Equal {
+                return provider_cmp;
+            }
+            lhs.display_name.cmp(&rhs.display_name)
+        });
+        presets.dedup_by(|lhs, rhs| lhs.id == rhs.id);
+        presets
+    }
+
+    fn custom_model_presets(&self) -> Vec<ModelPreset> {
+        let settings = settings::global();
+        let mut presets = Vec::new();
+        let current_model = self.config.model.as_str();
+        let current_provider = self.config.model_provider_id.as_str();
+
+        for (provider_id, provider) in settings.custom_providers() {
+            if provider_id == DEFAULT_OPENAI_PROVIDER_ID {
+                continue;
+            }
+
+            let mut models: Vec<String> = provider
+                .cached_models
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|model| !model.trim().is_empty())
+                .collect();
+
+            if let Some(default_model) = provider.default_model.as_ref()
+                && !default_model.trim().is_empty()
+                && !models.iter().any(|model| model == default_model)
+            {
+                models.push(default_model.trim().to_string());
+            }
+
+            if provider_id == current_provider
+                && !current_model.is_empty()
+                && !models.iter().any(|model| model == current_model)
+            {
+                models.push(current_model.to_string());
+            }
+
+            models.sort();
+            models.dedup();
+
+            if models.is_empty() {
+                continue;
+            }
+
+            let provider_display = if provider.name.trim().is_empty() {
+                provider_id.clone()
+            } else {
+                provider.name.clone()
+            };
+
+            let supported = reasoning_presets_for_kind(provider.provider_kind);
+            let default_effort = supported
+                .first()
+                .map(|preset| preset.effort)
+                .unwrap_or(ReasoningEffort::Minimal);
+            let description_base = describe_custom_provider(provider);
+
+            for model in models.iter() {
+                let is_current = provider_id == current_provider && model.as_str() == current_model;
+                let mut description_parts: Vec<String> = Vec::new();
+                if !description_base.is_empty() {
+                    description_parts.push(description_base.clone());
+                }
+                if provider
+                    .default_model
+                    .as_ref()
+                    .map(|default_model| default_model == model)
+                    .unwrap_or(false)
+                {
+                    description_parts.push("Configured as default model".to_string());
+                }
+                if let Some(last_refresh) = provider.last_model_refresh.as_ref()
+                    && !last_refresh.trim().is_empty()
+                {
+                    description_parts.push(format!("Cached models refreshed {last_refresh}"));
+                }
+
+                let preset = ModelPreset {
+                    id: format!("{provider_id}::{model}"),
+                    model: model.clone(),
+                    display_name: format!("{model} ({provider_display})"),
+                    description: description_parts.join(" • "),
+                    default_reasoning_effort: default_effort,
+                    supported_reasoning_efforts: supported.clone(),
+                    is_default: is_current,
+                    provider_id: Some(provider_id.clone()),
+                    provider_label: Some(provider_display.clone()),
+                };
+                presets.push(preset);
+            }
+        }
+
+        presets
+    }
+
     /// Open a popup to choose the reasoning effort (stage 2) for the given model.
     pub(crate) fn open_reasoning_popup(&mut self, preset: ModelPreset) {
         let default_effort: ReasoningEffortConfig = preset.default_reasoning_effort;
+        let provider_id = preset.provider_id.clone();
         let supported = preset.supported_reasoning_efforts;
 
         struct EffortChoice {
@@ -1838,9 +1994,11 @@ impl ChatWidget {
 
             let model_for_action = model_slug.clone();
             let effort_for_action = choice.stored;
+            let provider_id_for_action = provider_id.clone();
             let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
                 tx.send(AppEvent::CodexOp(Op::OverrideTurnContext {
                     cwd: None,
+                    provider_id: provider_id_for_action.clone(),
                     approval_policy: None,
                     sandbox_policy: None,
                     model: Some(model_for_action.clone()),
@@ -1916,7 +2074,10 @@ impl ChatWidget {
                 current_approval == preset.approval && current_sandbox == preset.sandbox;
             let name = preset.label.to_string();
             let description_text = preset.description;
-            let description = if cfg!(target_os = "windows") && preset.id == "auto" {
+            let description = if cfg!(target_os = "windows")
+                && preset.id == "auto"
+                && codex_core::get_platform_sandbox().is_none()
+            {
                 Some(format!(
                     "{description_text}\nRequires Windows Subsystem for Linux (WSL). Show installation instructions..."
                 ))
@@ -1936,7 +2097,10 @@ impl ChatWidget {
                         preset: preset_clone.clone(),
                     });
                 })]
-            } else if cfg!(target_os = "windows") && preset.id == "auto" {
+            } else if cfg!(target_os = "windows")
+                && preset.id == "auto"
+                && codex_core::get_platform_sandbox().is_none()
+            {
                 vec![Box::new(|tx| {
                     tx.send(AppEvent::ShowWindowsAutoModeInstructions);
                 })]
@@ -1970,6 +2134,7 @@ impl ChatWidget {
             let sandbox_clone = sandbox.clone();
             tx.send(AppEvent::CodexOp(Op::OverrideTurnContext {
                 cwd: None,
+                provider_id: None,
                 approval_policy: Some(approval),
                 sandbox_policy: Some(sandbox_clone.clone()),
                 model: None,
@@ -2453,6 +2618,55 @@ impl ChatWidget {
         let [_, _, bottom_pane_area] = self.layout_areas(area);
         self.bottom_pane.cursor_pos(bottom_pane_area)
     }
+}
+
+fn reasoning_presets_for_kind(kind: ProviderKind) -> Vec<ReasoningEffortPreset> {
+    match kind {
+        ProviderKind::OpenAiResponses | ProviderKind::AnthropicClaude => vec![
+            ReasoningEffortPreset {
+                effort: ReasoningEffort::Minimal,
+                description: "Fastest responses with limited reasoning".to_string(),
+            },
+            ReasoningEffortPreset {
+                effort: ReasoningEffort::Low,
+                description: "Balances latency with moderate reasoning depth".to_string(),
+            },
+            ReasoningEffortPreset {
+                effort: ReasoningEffort::Medium,
+                description: "Recommended balance of speed and reasoning".to_string(),
+            },
+            ReasoningEffortPreset {
+                effort: ReasoningEffort::High,
+                description: "Maximize reasoning depth for complex tasks".to_string(),
+            },
+        ],
+        ProviderKind::Ollama => vec![ReasoningEffortPreset {
+            effort: ReasoningEffort::Minimal,
+            description: "Fast local generation (recommended)".to_string(),
+        }],
+    }
+}
+
+fn describe_custom_provider(provider: &CustomProvider) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    match provider.provider_kind {
+        ProviderKind::OpenAiResponses => parts.push("OpenAI-compatible endpoint".to_string()),
+        ProviderKind::Ollama => parts.push("Local Ollama provider".to_string()),
+        ProviderKind::AnthropicClaude => {
+            parts.push("Anthropic Claude-compatible endpoint".to_string())
+        }
+    }
+    if let Some(url) = provider.base_url.as_deref()
+        && !url.trim().is_empty()
+    {
+        parts.push(url.trim().to_string());
+    }
+    if let Some(models) = provider.cached_models.as_ref()
+        && !models.is_empty()
+    {
+        parts.push(format!("Cached models: {}", models.len()));
+    }
+    parts.join(" • ")
 }
 
 pub(crate) fn refresh_model_metadata(config: &mut Config) {

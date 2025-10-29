@@ -59,6 +59,7 @@ impl ToolHandler for SearchCodeHandler {
         if hits.is_empty() {
             return Ok(ToolOutput::Function {
                 content: format!("No indexed results matched \"{query}\"."),
+                content_items: None,
                 success: Some(true),
             });
         }
@@ -90,6 +91,7 @@ impl ToolHandler for SearchCodeHandler {
         }
         Ok(ToolOutput::Function {
             content: lines.join("\n"),
+            content_items: None,
             success: Some(true),
         })
     }

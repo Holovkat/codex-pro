@@ -122,7 +122,7 @@ mod tests {
             .await
             .expect("load");
         let settings = manager.get().await;
-        assert!(settings.enabled);
+        assert!(!settings.enabled);
         assert_eq!(settings.min_confidence, 0.75);
     }
 

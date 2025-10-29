@@ -24,8 +24,8 @@ use base64::Engine;
 use codex_agentic_core::index::query::QueryHit;
 use codex_common::format_env_display::format_env_display;
 use codex_core::config::Config;
-use codex_core::config_types::McpServerTransportConfig;
-use codex_core::config_types::ReasoningSummaryFormat;
+use codex_core::config::types::McpServerTransportConfig;
+use codex_core::config::types::ReasoningSummaryFormat;
 use codex_core::protocol::FileChange;
 use codex_core::protocol::McpAuthStatus;
 use codex_core::protocol::McpInvocation;
@@ -1440,7 +1440,7 @@ fn format_mcp_invocation<'a>(invocation: McpInvocation) -> Line<'a> {
     let args_str = invocation
         .arguments
         .as_ref()
-        .map(|v| {
+        .map(|v: &serde_json::Value| {
             // Use compact form to keep things short but readable.
             serde_json::to_string(v).unwrap_or_else(|_| v.to_string())
         })
@@ -1644,8 +1644,8 @@ mod tests {
     use codex_core::config::Config;
     use codex_core::config::ConfigOverrides;
     use codex_core::config::ConfigToml;
-    use codex_core::config_types::McpServerConfig;
-    use codex_core::config_types::McpServerTransportConfig;
+    use codex_core::config::types::McpServerConfig;
+    use codex_core::config::types::McpServerTransportConfig;
     use codex_core::protocol::McpAuthStatus;
     use codex_protocol::parse_command::ParsedCommand;
     use dirs::home_dir;
@@ -2464,7 +2464,6 @@ mod tests {
     }
 
     #[test]
-<<<<<<< HEAD
     fn search_results_cell_formats_hits() {
         use codex_agentic_core::index::query::QueryHit;
 
@@ -2498,7 +2497,11 @@ mod tests {
                 String::new(),
                 "  2.  61% src/utils.rs:20-25".to_string(),
                 "    let value = compute();".to_string(),
-=======
+            ]
+        );
+    }
+
+    #[test]
     fn deprecation_notice_renders_summary_with_details() {
         let cell = new_deprecation_notice(
             "Feature flag `foo`".to_string(),
@@ -2511,7 +2514,6 @@ mod tests {
             vec![
                 "⚠ Feature flag `foo`".to_string(),
                 "Use flag `bar` instead.".to_string(),
->>>>>>> 060637b4d (feat: deprecation warning (#5825))
             ]
         );
     }

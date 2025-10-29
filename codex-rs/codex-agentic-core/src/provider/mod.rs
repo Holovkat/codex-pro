@@ -107,6 +107,17 @@ pub async fn list_models_for_provider(
                 }
                 return Ok(Vec::new());
             }
+            if other == DEFAULT_OPENAI_PROVIDER_ID {
+                let mut models = Vec::new();
+                if let Some(default_model) = settings
+                    .model
+                    .as_ref()
+                    .and_then(|model| model.default.clone())
+                {
+                    models.push(default_model);
+                }
+                return Ok(models);
+            }
             Err(anyhow::anyhow!("unsupported provider: {other}"))
         }
     }
@@ -422,8 +433,8 @@ pub fn sanitize_tool_overrides(config: &mut Config) {
         apply_patch_enabled,
     );
 
-    let view_image_enabled = provider_allows_tools && config.include_view_image_tool;
-    config.include_view_image_tool = view_image_enabled;
+    let view_image_enabled =
+        provider_allows_tools && config.features.enabled(Feature::ViewImageTool);
     toggle_feature(
         &mut config.features,
         Feature::ViewImageTool,

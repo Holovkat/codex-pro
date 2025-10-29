@@ -14,6 +14,7 @@ codex
 ```
 
 You can also install via Homebrew (`brew install --cask codex`) or download a platform-specific release directly from our [GitHub Releases](https://github.com/openai/codex/releases).
+If you're running into upgrade issues with Homebrew, see the [FAQ entry on brew upgrade codex](../docs/faq.md#brew-upgrade-codex-isnt-upgrading-me).
 
 ## Documentation quickstart
 
@@ -120,6 +121,9 @@ codex sandbox macos [--full-auto] [COMMAND]...
 
 # Linux
 codex sandbox linux [--full-auto] [COMMAND]...
+
+# Windows
+codex sandbox windows [--full-auto] [COMMAND]...
 
 # Legacy aliases
 codex debug seatbelt [--full-auto] [COMMAND]...

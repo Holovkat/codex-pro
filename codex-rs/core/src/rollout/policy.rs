@@ -46,11 +46,15 @@ pub(crate) fn should_persist_event_msg(ev: &EventMsg) -> bool {
         | EventMsg::UndoCompleted(_)
         | EventMsg::TurnAborted(_) => true,
         EventMsg::Error(_)
+        | EventMsg::Warning(_)
         | EventMsg::TaskStarted(_)
         | EventMsg::TaskComplete(_)
         | EventMsg::AgentMessageDelta(_)
         | EventMsg::AgentReasoningDelta(_)
         | EventMsg::AgentReasoningRawContentDelta(_)
+        | EventMsg::AgentMessageContentDelta(_)
+        | EventMsg::ReasoningContentDelta(_)
+        | EventMsg::ReasoningRawContentDelta(_)
         | EventMsg::AgentReasoningSectionBreak(_)
         | EventMsg::RawResponseItem(_)
         | EventMsg::SessionConfigured(_)
@@ -76,7 +80,6 @@ pub(crate) fn should_persist_event_msg(ev: &EventMsg) -> bool {
         | EventMsg::ShutdownComplete
         | EventMsg::ViewImageToolCall(_)
         | EventMsg::MemoryPreview(_)
-        | EventMsg::ConversationPath(_)
         | EventMsg::DeprecationNotice(_)
         | EventMsg::ItemStarted(_)
         | EventMsg::ItemCompleted(_) => false,

@@ -33,6 +33,7 @@ async fn override_turn_context_does_not_persist_when_config_exists() {
     codex
         .submit(Op::OverrideTurnContext {
             cwd: None,
+            provider_id: None,
             approval_policy: None,
             sandbox_policy: None,
             model: Some("o3".to_string()),
@@ -73,6 +74,7 @@ async fn override_turn_context_does_not_create_config_file() {
     codex
         .submit(Op::OverrideTurnContext {
             cwd: None,
+            provider_id: None,
             approval_policy: None,
             sandbox_policy: None,
             model: Some("o3".to_string()),
