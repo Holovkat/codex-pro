@@ -216,7 +216,7 @@ def run_check(schema_file: Path, crate_dir: Path, checked_in_lib: Path) -> int:
         manifest_text = manifest_path.read_text(encoding="utf-8")
         manifest_text = manifest_text.replace(
             "version = { workspace = true }",
-            'version = "0.0.0"',
+            'version = "0.50.0"',
         )
         manifest_text = manifest_text.replace("\n[lints]\nworkspace = true\n", "\n")
         manifest_path.write_text(manifest_text, encoding="utf-8")

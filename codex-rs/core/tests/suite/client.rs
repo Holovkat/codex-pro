@@ -13,8 +13,6 @@ use codex_core::ResponseEvent;
 use codex_core::ResponseItem;
 use codex_core::WireApi;
 use codex_core::built_in_model_providers;
-use codex_core::config_types::ProviderKind;
-use codex_core::config_types::ProviderReasoningControls;
 use codex_core::error::CodexErr;
 use codex_core::model_family::find_family_for_model;
 use codex_core::protocol::EventMsg;
@@ -643,8 +641,6 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
         stream_max_retries: Some(0),
         stream_idle_timeout_ms: Some(5_000),
         requires_openai_auth: false,
-        provider_kind: ProviderKind::OpenAiResponses,
-        reasoning_controls: ProviderReasoningControls::default(),
     };
 
     let codex_home = TempDir::new().unwrap();
@@ -1135,8 +1131,6 @@ async fn azure_overrides_assign_properties_used_for_responses_url() {
         stream_max_retries: None,
         stream_idle_timeout_ms: None,
         requires_openai_auth: false,
-        provider_kind: ProviderKind::OpenAiResponses,
-        reasoning_controls: ProviderReasoningControls::default(),
     };
 
     // Init session
@@ -1215,8 +1209,6 @@ async fn env_var_overrides_loaded_auth() {
         stream_max_retries: None,
         stream_idle_timeout_ms: None,
         requires_openai_auth: false,
-        provider_kind: ProviderKind::OpenAiResponses,
-        reasoning_controls: ProviderReasoningControls::default(),
     };
 
     // Init session

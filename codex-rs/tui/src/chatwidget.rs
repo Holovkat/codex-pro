@@ -5,8 +5,11 @@ use std::sync::Arc;
 
 use codex_core::config::Config;
 use codex_core::config_types::Notifications;
+use codex_core::get_model_info;
 use codex_core::git_info::current_branch_name;
 use codex_core::git_info::local_git_branches;
+use codex_core::model_family::derive_default_model_family;
+use codex_core::model_family::find_family_for_model;
 use codex_core::project_doc::DEFAULT_PROJECT_DOC_FILENAME;
 use codex_core::protocol::AgentMessageDeltaEvent;
 use codex_core::protocol::AgentMessageEvent;
@@ -27,6 +30,7 @@ use codex_core::protocol::ListCustomPromptsResponseEvent;
 use codex_core::protocol::McpListToolsResponseEvent;
 use codex_core::protocol::McpToolCallBeginEvent;
 use codex_core::protocol::McpToolCallEndEvent;
+use codex_core::protocol::MemoryPreviewEvent;
 use codex_core::protocol::Op;
 use codex_core::protocol::PatchApplyBeginEvent;
 use codex_core::protocol::RateLimitSnapshot;
@@ -109,6 +113,7 @@ use codex_common::model_presets::ModelPreset;
 use codex_common::model_presets::builtin_model_presets;
 use codex_core::AuthManager;
 use codex_core::ConversationManager;
+use codex_core::ModelProviderInfo;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
 use codex_core::protocol_config_types::ReasoningEffort as ReasoningEffortConfig;
@@ -492,6 +497,8 @@ impl ChatWidget {
             );
 
             let display = crate::status::rate_limit_snapshot_display(&snapshot, Local::now());
+            let summaries = crate::status::compose_rate_limit_footer(Some(&display));
+            self.bottom_pane.set_rate_limit_summaries(summaries);
             self.rate_limit_snapshot = Some(display);
 
             if !warnings.is_empty() {
@@ -501,6 +508,7 @@ impl ChatWidget {
                 self.request_redraw();
             }
         } else {
+            self.bottom_pane.set_rate_limit_summaries(Vec::new());
             self.rate_limit_snapshot = None;
         }
     }
@@ -563,6 +571,11 @@ impl ChatWidget {
 
     fn on_plan_update(&mut self, update: UpdatePlanArgs) {
         self.add_to_history(history_cell::new_plan_update(update));
+    }
+
+    fn on_memory_preview(&mut self, event: MemoryPreviewEvent) {
+        self.app_event_tx
+            .send(AppEvent::OpenMemoryPreview { preview: event });
     }
 
     fn on_exec_approval_request(&mut self, id: String, ev: ExecApprovalRequestEvent) {
@@ -676,7 +689,9 @@ impl ChatWidget {
         if self.retry_status_header.is_none() {
             self.retry_status_header = Some(self.current_status_header.clone());
         }
-        self.set_status_header(message);
+        self.set_status_header(message.clone());
+        self.add_to_history(history_cell::new_stream_error_event(message));
+        self.request_redraw();
     }
 
     /// Periodic tick to commit at most one queued line to history with a small delay,
@@ -1131,13 +1146,29 @@ impl ChatWidget {
                             self.submit_user_message(user_message);
                         }
                     }
-                    InputResult::Command(cmd) => {
-                        self.dispatch_command(cmd);
+                    InputResult::Command { command, args } => {
+                        self.dispatch_command(command, args);
                     }
                     InputResult::None => {}
                 }
             }
         }
+    }
+
+    fn handle_search_code_command(&mut self, args: Option<String>) {
+        if let Some(query) = args.and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }) {
+            self.app_event_tx
+                .send(AppEvent::SearchCodeRequested { query });
+            return;
+        }
+        self.app_event_tx.send(AppEvent::OpenSearchManager);
     }
 
     pub(crate) fn attach_image(
@@ -1155,7 +1186,7 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    fn dispatch_command(&mut self, cmd: SlashCommand) {
+    fn dispatch_command(&mut self, cmd: SlashCommand, args: Option<String>) {
         if !cmd.available_during_task() && self.bottom_pane.is_task_running() {
             let message = format!(
                 "'/{}' is disabled while a task is in progress.",
@@ -1198,8 +1229,17 @@ impl ChatWidget {
             SlashCommand::Model => {
                 self.open_model_popup();
             }
+            SlashCommand::IndexBuild => {
+                self.app_event_tx.send(AppEvent::StartIndexBuild);
+            }
             SlashCommand::Approvals => {
                 self.open_approvals_popup();
+            }
+            SlashCommand::SearchCode => {
+                self.handle_search_code_command(args);
+            }
+            SlashCommand::Byok => {
+                self.app_event_tx.send(AppEvent::OpenByokManager);
             }
             SlashCommand::Quit => {
                 self.app_event_tx.send(AppEvent::ExitRequest);
@@ -1238,6 +1278,9 @@ impl ChatWidget {
             }
             SlashCommand::Mcp => {
                 self.add_mcp_output();
+            }
+            SlashCommand::Memory => {
+                self.app_event_tx.send(AppEvent::OpenMemoryManager);
             }
             #[cfg(debug_assertions)]
             SlashCommand::TestApproval => {
@@ -1492,6 +1535,7 @@ impl ChatWidget {
             EventMsg::ApplyPatchApprovalRequest(ev) => {
                 self.on_apply_patch_approval_request(id.unwrap_or_default(), ev)
             }
+            EventMsg::MemoryPreview(event) => self.on_memory_preview(event),
             EventMsg::ExecCommandBegin(ev) => self.on_exec_command_begin(ev),
             EventMsg::ExecCommandOutputDelta(delta) => self.on_exec_command_output_delta(delta),
             EventMsg::PatchApplyBegin(ev) => self.on_patch_apply_begin(ev),
@@ -1679,10 +1723,10 @@ impl ChatWidget {
                 Some(preset.description.to_string())
             };
             let is_current = preset.model == current_model;
-            let preset_for_action = preset;
+            let preset_for_action = preset.clone();
             let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
                 tx.send(AppEvent::OpenReasoningPopup {
-                    model: preset_for_action,
+                    model: preset_for_action.clone(),
                 });
             })];
             items.push(SelectionItem {
@@ -1691,6 +1735,7 @@ impl ChatWidget {
                 is_current,
                 actions,
                 dismiss_on_select: false,
+                search_value: Some(preset.model.clone()),
                 ..Default::default()
             });
         }
@@ -1755,7 +1800,7 @@ impl ChatWidget {
                 effort_label.push_str(" (default)");
             }
 
-            let description = choice
+            let mut description = choice
                 .stored
                 .and_then(|effort| {
                     supported
@@ -1768,11 +1813,13 @@ impl ChatWidget {
             let warning = "⚠ High reasoning effort can quickly consume Plus plan rate limits.";
             let show_warning =
                 preset.model == "gpt-5-codex" && effort == ReasoningEffortConfig::High;
-            let selected_description = show_warning.then(|| {
-                description
-                    .as_ref()
-                    .map_or(warning.to_string(), |d| format!("{d}\n{warning}"))
-            });
+            if show_warning {
+                let warning_text = warning.to_string();
+                description = Some(match description {
+                    Some(text) if !text.is_empty() => format!("{text}\n{warning_text}"),
+                    _ => warning_text,
+                });
+            }
 
             let model_for_action = model_slug.clone();
             let effort_for_action = choice.stored;
@@ -1803,18 +1850,17 @@ impl ChatWidget {
             items.push(SelectionItem {
                 name: effort_label,
                 description,
-                selected_description,
                 is_current: is_current_model && choice.stored == highlight_choice,
                 actions,
                 dismiss_on_select: true,
+                search_value: Some(choice.display.to_string()),
                 ..Default::default()
             });
         }
 
-        let mut header = ColumnRenderable::new();
-        header.push(Line::from(
-            format!("Select Reasoning Level for {model_slug}").bold(),
-        ));
+        let header_text = format!("Select Reasoning Level for {model_slug}");
+        let header_line = Line::from(vec![header_text.bold()]);
+        let header = ColumnRenderable::new([Box::new(header_line) as Box<dyn Renderable>]);
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
             header: Box::new(header),
@@ -1891,19 +1937,19 @@ impl ChatWidget {
     pub(crate) fn open_full_access_confirmation(&mut self, preset: ApprovalPreset) {
         let approval = preset.approval;
         let sandbox = preset.sandbox;
-        let mut header_children: Vec<Box<dyn Renderable>> = Vec::new();
-        let title_line = Line::from("Enable full access?").bold();
+        let title_line = Line::from(vec!["Enable full access?".bold()]);
         let info_line = Line::from(vec![
             "When Codex runs with full access, it can edit any file on your computer and run commands with network, without your approval. "
                 .into(),
             "Exercise caution when enabling full access. This significantly increases the risk of data loss, leaks, or unexpected behavior."
                 .fg(Color::Red),
         ]);
-        header_children.push(Box::new(title_line));
-        header_children.push(Box::new(
-            Paragraph::new(vec![info_line]).wrap(Wrap { trim: false }),
-        ));
-        let header = ColumnRenderable::with(header_children);
+        let header_children: Vec<Box<dyn Renderable>> = vec![
+            Box::new(title_line) as Box<dyn Renderable>,
+            Box::new(Paragraph::new(vec![info_line]).wrap(Wrap { trim: false }))
+                as Box<dyn Renderable>,
+        ];
+        let header = ColumnRenderable::new(header_children);
 
         let mut accept_actions = Self::approval_preset_actions(approval, sandbox.clone());
         accept_actions.push(Box::new(|tx| {
@@ -1975,6 +2021,49 @@ impl ChatWidget {
     pub(crate) fn set_model(&mut self, model: &str) {
         self.session_header.set_model(model);
         self.config.model = model.to_string();
+        refresh_model_metadata(&mut self.config);
+    }
+
+    pub(crate) fn set_model_provider(&mut self, provider_id: &str, provider: &ModelProviderInfo) {
+        self.config.model_provider_id = provider_id.to_string();
+        self.config.model_provider = provider.clone();
+        refresh_model_metadata(&mut self.config);
+    }
+
+    pub(crate) fn sync_model_providers(
+        &mut self,
+        providers: &std::collections::HashMap<String, ModelProviderInfo>,
+    ) {
+        self.config.model_providers = providers.clone();
+    }
+
+    pub(crate) fn set_index_status_line(&mut self, status: Option<String>) {
+        self.bottom_pane.set_index_status_line(status);
+        self.request_redraw();
+    }
+
+    pub(crate) fn push_bottom_view<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut BottomPane),
+    {
+        f(&mut self.bottom_pane);
+        self.request_redraw();
+    }
+
+    pub(crate) fn show_selection_view(&mut self, params: SelectionViewParams) {
+        self.bottom_pane.show_selection_view(params);
+        self.request_redraw();
+    }
+
+    pub(crate) fn add_search_results(
+        &mut self,
+        query: String,
+        confidence: f32,
+        hits: Vec<codex_agentic_core::index::query::QueryHit>,
+    ) {
+        let cell = history_cell::new_search_results(query, confidence, hits);
+        self.add_boxed_history(cell);
+        self.request_redraw();
     }
 
     pub(crate) fn add_info_message(&mut self, message: String, hint: Option<String>) {
@@ -2263,6 +2352,22 @@ impl ChatWidget {
     pub fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
         let [_, _, bottom_pane_area] = self.layout_areas(area);
         self.bottom_pane.cursor_pos(bottom_pane_area)
+    }
+}
+
+pub(crate) fn refresh_model_metadata(config: &mut Config) {
+    let family = find_family_for_model(&config.model)
+        .unwrap_or_else(|| derive_default_model_family(&config.model));
+    config.model_family = family;
+
+    if let Some(info) = get_model_info(&config.model_family) {
+        config.model_context_window = Some(info.context_window());
+        config.model_max_output_tokens = Some(info.max_output_tokens());
+        config.model_auto_compact_token_limit = info.auto_compact_token_limit;
+    } else {
+        config.model_context_window = None;
+        config.model_max_output_tokens = None;
+        config.model_auto_compact_token_limit = None;
     }
 }
 

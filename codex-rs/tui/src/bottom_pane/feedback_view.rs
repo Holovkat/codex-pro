@@ -439,7 +439,7 @@ pub(crate) fn feedback_upload_consent_params(
                 ..Default::default()
             },
         ],
-        header: Box::new(crate::render::renderable::ColumnRenderable::with(
+        header: Box::new(crate::render::renderable::ColumnRenderable::new(
             header_lines,
         )),
         ..Default::default()

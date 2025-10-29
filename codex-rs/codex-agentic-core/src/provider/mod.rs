@@ -321,8 +321,6 @@ pub fn custom_provider_model_info(provider_id: &str, custom: &CustomProvider) ->
         stream_max_retries: None,
         stream_idle_timeout_ms: None,
         requires_openai_auth: false,
-        provider_kind: custom.provider_kind,
-        reasoning_controls: custom.reasoning_controls.clone(),
         experimental_bearer_token: None,
     };
 

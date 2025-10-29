@@ -306,8 +306,10 @@ mod tests {
     #[test]
     fn test_get_update_action() {
         let prev = std::env::var_os("CODEX_MANAGED_BY_NPM");
+        let prev_bun = std::env::var_os("CODEX_MANAGED_BY_BUN");
 
         unsafe { std::env::remove_var("CODEX_MANAGED_BY_NPM") };
+        unsafe { std::env::remove_var("CODEX_MANAGED_BY_BUN") };
         assert_eq!(get_update_action(), None);
 
         unsafe { std::env::set_var("CODEX_MANAGED_BY_NPM", "1") };
@@ -317,6 +319,12 @@ mod tests {
             unsafe { std::env::set_var("CODEX_MANAGED_BY_NPM", v) };
         } else {
             unsafe { std::env::remove_var("CODEX_MANAGED_BY_NPM") };
+        }
+
+        if let Some(v) = prev_bun {
+            unsafe { std::env::set_var("CODEX_MANAGED_BY_BUN", v) };
+        } else {
+            unsafe { std::env::remove_var("CODEX_MANAGED_BY_BUN") };
         }
     }
 }

@@ -13,7 +13,6 @@ use crate::config_types::Notifications;
 use crate::config_types::OtelConfig;
 use crate::config_types::OtelConfigToml;
 use crate::config_types::OtelExporterKind;
-use crate::config_types::ProviderKind;
 use crate::config_types::ReasoningSummaryFormat;
 use crate::config_types::SandboxWorkspaceWrite;
 use crate::config_types::ShellEnvironmentPolicy;
@@ -86,6 +85,11 @@ fn base_url_is_zai(url: &str) -> bool {
     lower.contains("open.bigmodel.cn/api/coding/paas/")
         || lower.contains("api.z.ai/api/coding/paas/")
         || lower.contains("api.z.ai/api/paas/")
+}
+
+fn base_url_is_ollama(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.contains("ollama") || lower.contains(":11434")
 }
 
 /// Application configuration loaded from disk and merged with overrides.
@@ -1515,7 +1519,15 @@ impl Config {
             return false;
         }
 
-        if matches!(self.model_provider.provider_kind, ProviderKind::Ollama) {
+        if self.model_provider_id.eq_ignore_ascii_case("ollama")
+            || self.model_provider.name.eq_ignore_ascii_case("ollama")
+            || self
+                .model_provider
+                .base_url
+                .as_deref()
+                .map(base_url_is_ollama)
+                .unwrap_or(false)
+        {
             return false;
         }
 
@@ -2904,8 +2916,6 @@ model_verbosity = "high"
             stream_max_retries: Some(10),
             stream_idle_timeout_ms: Some(300_000),
             requires_openai_auth: false,
-            provider_kind: crate::config_types::ProviderKind::OpenAiResponses,
-            reasoning_controls: crate::config_types::ProviderReasoningControls::default(),
         };
         let model_provider_map = {
             let mut model_provider_map = built_in_model_providers();

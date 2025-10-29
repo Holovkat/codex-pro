@@ -91,6 +91,28 @@ fn upgrade_event_payload_for_tests(mut payload: serde_json::Value) -> serde_json
                     serde_json::Value::String(aggregated),
                 );
             }
+        } else if ty == "exec_command_begin" {
+            let needs_parsed_cmd = m
+                .get("parsed_cmd")
+                .map(|value| !matches!(value, serde_json::Value::Array(_)))
+                .unwrap_or(true);
+            if needs_parsed_cmd {
+                m.insert(
+                    "parsed_cmd".to_string(),
+                    serde_json::Value::Array(Vec::new()),
+                );
+            }
+        } else if ty == "exec_approval_request" {
+            let needs_parsed_cmd = m
+                .get("parsed_cmd")
+                .map(|value| !matches!(value, serde_json::Value::Array(_)))
+                .unwrap_or(true);
+            if needs_parsed_cmd {
+                m.insert(
+                    "parsed_cmd".to_string(),
+                    serde_json::Value::Array(Vec::new()),
+                );
+            }
         }
     }
     payload
@@ -709,7 +731,7 @@ fn ctrl_c_cleared_prompt_is_recoverable_via_history() {
     chat.bottom_pane.insert_str("draft message ");
     chat.bottom_pane
         .attach_image(PathBuf::from("/tmp/preview.png"), 24, 42, "png");
-    let placeholder = "[preview.png 24x42]";
+    let placeholder = "[image 24x42 png]";
     assert!(
         chat.bottom_pane.composer_text().ends_with(placeholder),
         "expected placeholder {placeholder:?} in composer text"
@@ -825,7 +847,7 @@ fn slash_init_skips_when_project_doc_exists() {
     std::fs::write(&existing_path, "existing instructions").unwrap();
     chat.config.cwd = tempdir.path().to_path_buf();
 
-    chat.dispatch_command(SlashCommand::Init);
+    chat.dispatch_command(SlashCommand::Init, None);
 
     match op_rx.try_recv() {
         Err(TryRecvError::Empty) => {}
@@ -1212,7 +1234,7 @@ fn feedback_selection_popup_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
 
     // Open the feedback category selection popup via slash command.
-    chat.dispatch_command(SlashCommand::Feedback);
+    chat.dispatch_command(SlashCommand::Feedback, None);
 
     let popup = render_bottom_popup(&chat, 80);
     assert_snapshot!("feedback_selection_popup", popup);
@@ -1290,7 +1312,7 @@ fn disabled_slash_command_while_task_running_snapshot() {
     chat.bottom_pane.set_task_running(true);
 
     // Dispatch a command that is unavailable while a task runs (e.g., /model)
-    chat.dispatch_command(SlashCommand::Model);
+    chat.dispatch_command(SlashCommand::Model, None);
 
     // Drain history and snapshot the rendered error line(s)
     let cells = drain_insert_history(&mut rx);
@@ -1347,9 +1369,29 @@ async fn binary_size_transcript_snapshot() {
         match kind {
             "codex_event" => {
                 if let Some(payload) = v.get("payload") {
-                    let ev: Event =
-                        serde_json::from_value(upgrade_event_payload_for_tests(payload.clone()))
-                            .expect("parse");
+                    let mut upgraded = upgrade_event_payload_for_tests(payload.clone());
+                    if let Some(msg) = upgraded
+                        .get_mut("msg")
+                        .and_then(serde_json::Value::as_object_mut)
+                    {
+                        let is_exec_begin = msg
+                            .get("type")
+                            .and_then(serde_json::Value::as_str)
+                            .map(|ty| ty == "exec_command_begin")
+                            .unwrap_or(false);
+                        if is_exec_begin
+                            && !matches!(msg.get("parsed_cmd"), Some(serde_json::Value::Array(_)))
+                        {
+                            msg.insert(
+                                "parsed_cmd".to_string(),
+                                serde_json::Value::Array(Vec::new()),
+                            );
+                        }
+                    }
+                    let ev: Event = match serde_json::from_value(upgraded.clone()) {
+                        Ok(ev) => ev,
+                        Err(err) => panic!("failed to parse payload {upgraded:?}: {err}"),
+                    };
                     let ev = match ev {
                         Event {
                             msg: EventMsg::ExecCommandBegin(e),
@@ -2231,15 +2273,22 @@ fn stream_error_updates_status_indicator() {
     });
 
     let cells = drain_insert_history(&mut rx);
-    assert!(
-        cells.is_empty(),
-        "expected no history cell for StreamError event"
-    );
+    let stream_error_cell = cells
+        .iter()
+        .find_map(|lines| {
+            let blob = lines_to_single_string(lines);
+            blob.contains(msg).then_some(blob)
+        })
+        .expect("expected stream error history cell with reconnect message");
     let status = chat
         .bottom_pane
         .status_widget()
         .expect("status indicator should be visible");
     assert_eq!(status.header(), msg);
+    assert!(
+        stream_error_cell.contains("Re-connecting"),
+        "expected stream error copy in history cell"
+    );
 }
 
 #[test]

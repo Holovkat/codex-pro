@@ -369,6 +369,19 @@ fn matches_azure_responses_base_url(base_url: &str) -> bool {
     AZURE_MARKERS.iter().any(|marker| base.contains(marker))
 }
 
+pub fn oss_model_supports_tools(model: &str) -> bool {
+    let slug_without_namespace = model
+        .rsplit_once('/')
+        .map(|(_, slug)| slug)
+        .unwrap_or(model);
+    let slug_without_variant = slug_without_namespace
+        .split_once(':')
+        .map(|(slug, _)| slug)
+        .unwrap_or(slug_without_namespace);
+
+    slug_without_variant.starts_with("gpt-oss") && !slug_without_namespace.contains("qwen2.5vl")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,5 +541,14 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
                 "expected {base_url} not to be detected as Azure"
             );
         }
+    }
+
+    #[test]
+    fn evaluates_oss_tool_support() {
+        assert!(oss_model_supports_tools("gpt-oss"));
+        assert!(oss_model_supports_tools("gpt-oss:latest"));
+        assert!(oss_model_supports_tools("namespace/gpt-oss:beta"));
+        assert!(!oss_model_supports_tools("gpt-oss/qwen2.5vl"));
+        assert!(!oss_model_supports_tools("gpt-4o"));
     }
 }

@@ -341,23 +341,23 @@ mod tests {
 
     #[test]
     fn test_invalid_suffix_is_sanitized() {
-        let prefix = "codex_cli_rs/0.0.0";
+        let prefix = format!("codex_cli_rs/{}", env!("CARGO_PKG_VERSION"));
         let suffix = "bad\rsuffix";
 
         assert_eq!(
-            sanitize_user_agent(format!("{prefix} ({suffix})"), prefix),
-            "codex_cli_rs/0.0.0 (bad_suffix)"
+            sanitize_user_agent(format!("{prefix} ({suffix})"), &prefix),
+            format!("codex_cli_rs/{} (bad_suffix)", env!("CARGO_PKG_VERSION"))
         );
     }
 
     #[test]
     fn test_invalid_suffix_is_sanitized2() {
-        let prefix = "codex_cli_rs/0.0.0";
+        let prefix = format!("codex_cli_rs/{}", env!("CARGO_PKG_VERSION"));
         let suffix = "bad\0suffix";
 
         assert_eq!(
-            sanitize_user_agent(format!("{prefix} ({suffix})"), prefix),
-            "codex_cli_rs/0.0.0 (bad_suffix)"
+            sanitize_user_agent(format!("{prefix} ({suffix})"), &prefix),
+            format!("codex_cli_rs/{} (bad_suffix)", env!("CARGO_PKG_VERSION"))
         );
     }
 

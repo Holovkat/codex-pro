@@ -16,6 +16,7 @@ use mcp_types::TextResourceContents;
 use serde_json::json;
 
 const RESOURCE_URI: &str = "memo://codex/example-note";
+const TEST_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn stdio_server_bin() -> anyhow::Result<PathBuf> {
     let build = CargoBuild::new()
@@ -35,7 +36,7 @@ fn init_params() -> InitializeRequestParams {
         },
         client_info: Implementation {
             name: "codex-test".into(),
-            version: "0.0.0-test".into(),
+            version: format!("{}-test", TEST_VERSION).into(),
             title: Some("Codex rmcp resource test".into()),
             user_agent: None,
         },

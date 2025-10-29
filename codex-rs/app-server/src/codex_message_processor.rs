@@ -1667,6 +1667,8 @@ mod tests {
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
+    const TEST_VERSION: &str = env!("CARGO_PKG_VERSION");
+
     #[test]
     fn extract_conversation_summary_prefers_plain_user_messages() -> Result<()> {
         let conversation_id = ConversationId::from_string("3f941c35-29b3-493b-b0a4-e25800d9aeb0")?;
@@ -1679,7 +1681,7 @@ mod tests {
                 "timestamp": timestamp,
                 "cwd": "/",
                 "originator": "codex",
-                "cli_version": "0.0.0",
+                "cli_version": TEST_VERSION,
                 "instructions": null
             }),
             json!({

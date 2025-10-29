@@ -16,7 +16,6 @@ use crate::key_hint::KeyBinding;
 use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::renderable::ColumnRenderable;
 use crate::render::renderable::Renderable;
-use crate::text_formatting::truncate_text;
 use codex_core::protocol::FileChange;
 use codex_core::protocol::Op;
 use codex_core::protocol::ReviewDecision;
@@ -164,11 +163,8 @@ impl ApprovalOverlay {
     }
 
     fn handle_exec_decision(&self, id: &str, command: &[String], decision: ReviewDecision) {
-        if let Some(lines) = build_exec_history_lines(command.to_vec(), decision) {
-            self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
-                history_cell::new_user_approval_decision(lines),
-            )));
-        }
+        let cell = history_cell::new_approval_decision_cell(command.to_vec(), decision);
+        self.app_event_tx.send(AppEvent::InsertHistoryCell(cell));
         self.app_event_tx.send(AppEvent::CodexOp(Op::ExecApproval {
             id: id.to_string(),
             decision,
@@ -449,87 +445,6 @@ fn patch_options() -> Vec<ApprovalOption> {
             additional_shortcuts: vec![key_hint::plain(KeyCode::Char('n'))],
         },
     ]
-}
-
-fn build_exec_history_lines(
-    command: Vec<String>,
-    decision: ReviewDecision,
-) -> Option<Vec<Line<'static>>> {
-    use ReviewDecision::*;
-
-    let (symbol, summary): (Span<'static>, Vec<Span<'static>>) = match decision {
-        Approved => {
-            let snippet = Span::from(exec_snippet(&command)).dim();
-            (
-                "✔ ".green(),
-                vec![
-                    "You ".into(),
-                    "approved".bold(),
-                    " codex to run ".into(),
-                    snippet,
-                    " this time".bold(),
-                ],
-            )
-        }
-        ApprovedForSession => {
-            let snippet = Span::from(exec_snippet(&command)).dim();
-            (
-                "✔ ".green(),
-                vec![
-                    "You ".into(),
-                    "approved".bold(),
-                    " codex to run ".into(),
-                    snippet,
-                    " every time this session".bold(),
-                ],
-            )
-        }
-        Denied => {
-            let snippet = Span::from(exec_snippet(&command)).dim();
-            (
-                "✗ ".red(),
-                vec![
-                    "You ".into(),
-                    "did not approve".bold(),
-                    " codex to run ".into(),
-                    snippet,
-                ],
-            )
-        }
-        Abort => {
-            let snippet = Span::from(exec_snippet(&command)).dim();
-            (
-                "✗ ".red(),
-                vec![
-                    "You ".into(),
-                    "canceled".bold(),
-                    " the request to run ".into(),
-                    snippet,
-                ],
-            )
-        }
-    };
-
-    let mut lines = Vec::new();
-    let mut spans = Vec::new();
-    spans.push(symbol);
-    spans.extend(summary);
-    lines.push(Line::from(spans));
-    Some(lines)
-}
-
-fn truncate_exec_snippet(full_cmd: &str) -> String {
-    let mut snippet = match full_cmd.split_once('\n') {
-        Some((first, _)) => format!("{first} ..."),
-        None => full_cmd.to_string(),
-    };
-    snippet = truncate_text(&snippet, 80);
-    snippet
-}
-
-fn exec_snippet(command: &[String]) -> String {
-    let full_cmd = strip_bash_lc_and_escape(command);
-    truncate_exec_snippet(&full_cmd)
 }
 
 #[cfg(test)]

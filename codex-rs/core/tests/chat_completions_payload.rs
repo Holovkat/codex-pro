@@ -10,8 +10,6 @@ use codex_core::ModelProviderInfo;
 use codex_core::Prompt;
 use codex_core::ResponseItem;
 use codex_core::WireApi;
-use codex_core::config_types::ProviderKind;
-use codex_core::config_types::ProviderReasoningControls;
 use codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR;
 use codex_otel::otel_event_manager::OtelEventManager;
 use codex_protocol::ConversationId;
@@ -61,8 +59,6 @@ async fn run_request(input: Vec<ResponseItem>) -> Value {
         stream_max_retries: Some(0),
         stream_idle_timeout_ms: Some(5_000),
         requires_openai_auth: false,
-        provider_kind: ProviderKind::OpenAiResponses,
-        reasoning_controls: ProviderReasoningControls::default(),
     };
 
     let codex_home = match TempDir::new() {

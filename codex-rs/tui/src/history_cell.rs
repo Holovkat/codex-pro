@@ -165,7 +165,7 @@ impl ReasoningSummaryCell {
         );
 
         let reasoning_style = Style::default()
-            .fg(Color::Indexed(247))
+            .fg(Color::Gray)
             .add_modifier(Modifier::ITALIC)
             .add_modifier(Modifier::DIM);
         let summary_lines = lines
@@ -630,6 +630,7 @@ pub(crate) fn new_user_prompt(message: String) -> UserHistoryCell {
     UserHistoryCell { message }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn new_user_approval_decision(lines: Vec<Line<'static>>) -> PlainHistoryCell {
     PlainHistoryCell { lines }
 }

@@ -53,6 +53,7 @@ use codex_core::WireApi;
 use codex_core::config::Config;
 use codex_core::config::OPENAI_DEFAULT_MODEL;
 use codex_core::config::persist_model_selection;
+use codex_core::config::set_hide_full_access_warning;
 use codex_core::config_types::ProviderKind;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::SessionSource;
@@ -951,6 +952,24 @@ impl App {
                 ));
                 tui.frame_requester().schedule_frame();
             }
+            AppEvent::OpenFullAccessConfirmation { preset } => {
+                self.chat_widget.open_full_access_confirmation(preset);
+            }
+            AppEvent::UpdateFullAccessWarningAcknowledged(acknowledged) => {
+                self.chat_widget
+                    .set_full_access_warning_acknowledged(acknowledged);
+                self.config.notices.hide_full_access_warning = Some(acknowledged);
+            }
+            AppEvent::PersistFullAccessWarningAcknowledged => {
+                if let Some(value) = self.config.notices.hide_full_access_warning
+                    && let Err(err) = set_hide_full_access_warning(&self.config.codex_home, value)
+                {
+                    tracing::error!("failed to persist full access warning acknowledgement: {err}");
+                }
+            }
+            AppEvent::OpenApprovalsPopup => {
+                self.chat_widget.open_approvals_popup();
+            }
             AppEvent::OpenSearchManager => {
                 self.open_search_manager();
             }
@@ -1225,7 +1244,8 @@ impl App {
             context,
             on_submit,
         );
-        self.chat_widget.push_bottom_view(Box::new(view));
+        self.chat_widget
+            .push_bottom_view(move |pane| pane.show_view(Box::new(view)));
     }
 
     fn show_search_confidence_prompt(&mut self) {
@@ -1245,7 +1265,8 @@ impl App {
             on_submit,
         )
         .with_allow_empty_submit(true);
-        self.chat_widget.push_bottom_view(Box::new(view));
+        self.chat_widget
+            .push_bottom_view(move |pane| pane.show_view(Box::new(view)));
     }
 
     fn handle_search_confidence_submission(&mut self, raw: String) {
@@ -1965,7 +1986,8 @@ impl App {
                     | ByokDraftField::AnthropicBudgetTokens
                     | ByokDraftField::AnthropicBudgetWeight
             ));
-        self.chat_widget.push_bottom_view(Box::new(view));
+        self.chat_widget
+            .push_bottom_view(move |pane| pane.show_view(Box::new(view)));
     }
 
     fn update_byok_draft_field(&mut self, field: ByokDraftField, value: String) {

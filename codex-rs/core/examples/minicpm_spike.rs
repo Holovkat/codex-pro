@@ -10,7 +10,6 @@ use anyhow::Context;
 use anyhow::Result;
 use chrono::DateTime;
 use chrono::Utc;
-use codex_agentic_core::index::embedder::EmbeddingHandle;
 use serde::Deserialize;
 use serde::Serialize;
 use textwrap::wrap;
@@ -52,16 +51,6 @@ fn main() -> Result<()> {
         summary.model_version
     );
     println!("Summary preview:\n{}\n", summary.text);
-
-    let mut embedder = EmbeddingProbe::new()?;
-    let embed_start = Instant::now();
-    let embedding = embedder.embed(&summary.text)?;
-    let embed_elapsed = embed_start.elapsed();
-    println!(
-        "Embedding dimension {} computed in {:.2} ms",
-        embedding.len(),
-        embed_elapsed.as_secs_f64() * 1000.0
-    );
 
     Ok(())
 }
@@ -135,26 +124,6 @@ impl MiniCpmHandle {
         MODEL_FILES
             .iter()
             .all(|name| self.model_dir.join(name).exists())
-    }
-}
-
-struct EmbeddingProbe {
-    handle: EmbeddingHandle,
-}
-
-impl EmbeddingProbe {
-    fn new() -> Result<Self> {
-        Ok(Self {
-            handle: EmbeddingHandle::new(None)?,
-        })
-    }
-
-    fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
-        let embeddings = self.handle.embed(vec![text.to_string()])?;
-        embeddings
-            .into_iter()
-            .next()
-            .context("embedding result missing")
     }
 }
 
