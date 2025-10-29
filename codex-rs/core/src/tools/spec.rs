@@ -1112,6 +1112,7 @@ mod tests {
         let config = ToolsConfig::new(&ToolsConfigParams {
             model_family: &model_family,
             features: &features,
+            allow_tools: true,
         });
         let (tools, _) = build_specs(&config, None).build();
 

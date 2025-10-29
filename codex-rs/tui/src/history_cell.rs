@@ -1305,7 +1305,7 @@ pub(crate) fn new_patch_apply_failure(stderr: String) -> PlainHistoryCell {
     lines.push(Line::from("✘ Failed to apply patch".magenta().bold()));
 
     if !stderr.trim().is_empty() {
-        lines.extend(output_lines(
+        let raw_output = output_lines(
             Some(&CommandOutput {
                 exit_code: 1,
                 formatted_output: String::new(),
@@ -1315,7 +1315,8 @@ pub(crate) fn new_patch_apply_failure(stderr: String) -> PlainHistoryCell {
                 include_angle_pipe: true,
                 include_prefix: true,
             },
-        ));
+        );
+        lines.extend(raw_output.lines);
     }
 
     PlainHistoryCell { lines }
