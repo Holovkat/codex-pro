@@ -89,6 +89,7 @@ use crate::protocol::AgentReasoningSectionBreakEvent;
 use crate::protocol::ApplyPatchApprovalRequestEvent;
 use crate::protocol::AskForApproval;
 use crate::protocol::BackgroundEventEvent;
+use crate::protocol::DeprecationNoticeEvent;
 use crate::protocol::ErrorEvent;
 use crate::protocol::Event;
 use crate::protocol::EventMsg;
@@ -475,7 +476,7 @@ impl Session {
         };
 
         // Error messages to dispatch after SessionConfigured is sent.
-        let mut post_session_configured_error_events = Vec::<Event>::new();
+        let mut post_session_configured_events = Vec::<Event>::new();
 
         // Kick off independent async setup tasks in parallel to reduce startup latency.
         //
@@ -523,7 +524,7 @@ impl Session {
             Err(e) => {
                 let message = format!("Failed to create MCP connection manager: {e:#}");
                 error!("{message}");
-                post_session_configured_error_events.push(Event {
+                post_session_configured_events.push(Event {
                     id: INITIAL_SUBMIT_ID.to_owned(),
                     msg: EventMsg::Error(ErrorEvent { message }),
                 });
@@ -537,7 +538,7 @@ impl Session {
                 let auth_entry = auth_statuses.get(&server_name);
                 let display_message = mcp_init_error_display(&server_name, auth_entry, &err);
                 warn!("MCP client for `{server_name}` failed to start: {err:#}");
-                post_session_configured_error_events.push(Event {
+                post_session_configured_events.push(Event {
                     id: INITIAL_SUBMIT_ID.to_owned(),
                     msg: EventMsg::Error(ErrorEvent {
                         message: display_message,
@@ -546,7 +547,25 @@ impl Session {
             }
         }
 
+<<<<<<< HEAD
         let auth_snapshot = auth_manager.auth();
+=======
+        for (alias, feature) in session_configuration.features.legacy_feature_usages() {
+            let canonical = feature.key();
+            let summary = format!("`{alias}` is deprecated. Use `{canonical}` instead.");
+            let details = if alias == canonical {
+                None
+            } else {
+                Some(format!(
+                    "You can either enable it using the CLI with `--enable {canonical}` or through the config.toml file with `[features].{canonical}`"
+                ))
+            };
+            post_session_configured_events.push(Event {
+                id: INITIAL_SUBMIT_ID.to_owned(),
+                msg: EventMsg::DeprecationNotice(DeprecationNoticeEvent { summary, details }),
+            });
+        }
+
         let otel_event_manager = OtelEventManager::new(
             conversation_id,
             config.model.as_str(),
@@ -554,6 +573,9 @@ impl Session {
             auth_snapshot
                 .as_ref()
                 .and_then(super::auth::CodexAuth::get_account_id),
+            auth_snapshot
+                .as_ref()
+                .and_then(super::auth::CodexAuth::get_account_email),
             auth_snapshot.as_ref().map(|a| a.mode),
             config.otel.log_user_prompt,
             terminal::user_agent(),
@@ -642,7 +664,7 @@ impl Session {
                 rollout_path,
             }),
         })
-        .chain(post_session_configured_error_events.into_iter());
+        .chain(post_session_configured_events.into_iter());
         for event in events {
             sess.send_event_raw(event).await;
         }
@@ -1310,9 +1332,6 @@ impl Session {
         }
     }
 
-    /// Helper that emits a BackgroundEvent with the given message. This keeps
-    /// the call‑sites terse so adding more diagnostics does not clutter the
-    /// core agent logic.
     pub(crate) async fn notify_background_event(
         &self,
         turn_context: &TurnContext,
