@@ -93,7 +93,7 @@ impl From<&RateLimitWindow> for RateLimitWindowUsage {
         Self {
             used_percent: window.used_percent,
             window_minutes: window.window_minutes,
-            resets_at: window.resets_at.clone(),
+            resets_at: window.resets_at,
         }
     }
 }

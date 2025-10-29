@@ -24,8 +24,6 @@ use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::protocol::ConversationPathResponseEvent;
 use codex_protocol::protocol::ExitedReviewModeEvent;
-#[cfg(test)]
-use codex_protocol::protocol::McpAuthStatus;
 use codex_protocol::protocol::MemoryPreviewEntry;
 use codex_protocol::protocol::MemoryPreviewEvent;
 use codex_protocol::protocol::ReviewRequest;
@@ -971,7 +969,7 @@ impl Session {
                                 preview_mode: retrieval.settings.preview_mode,
                             }),
                         };
-                        self.send_event(event).await;
+                        self.send_event_raw(event).await;
                     } else {
                         warn!("memory preview requested but no active turn state");
                     }

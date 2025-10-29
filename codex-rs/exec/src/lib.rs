@@ -20,7 +20,6 @@ use codex_agentic_core::load_settings;
 use codex_agentic_core::provider::DEFAULT_OPENAI_PROVIDER_ID;
 use codex_agentic_core::provider::ResolveModelProviderArgs;
 use codex_agentic_core::provider::custom_provider_model_info;
-use codex_agentic_core::provider::plan_tool_supported;
 use codex_core::AuthManager;
 use codex_core::ConversationManager;
 use codex_core::NewConversation;
@@ -170,8 +169,6 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
             .with_force_oss(oss),
     );
     let oss_active = resolution.oss_active;
-    let include_plan_tool = resolution.include_plan_tool;
-
     let custom_provider_selected = resolution
         .provider_override
         .clone()
@@ -190,7 +187,6 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         model_provider: resolution.provider_override.clone(),
         codex_linux_sandbox_exe,
         base_instructions: Some(base_prompt.clone()),
-        include_plan_tool: Some(include_plan_tool),
         include_apply_patch_tool: None,
         include_view_image_tool: None,
         show_raw_agent_reasoning: oss_active.then_some(true),
@@ -452,13 +448,6 @@ fn refresh_model_metadata(config: &mut Config) {
         config.model_max_output_tokens = None;
         config.model_auto_compact_token_limit = None;
     }
-
-    let model_slug = if config.model.is_empty() {
-        None
-    } else {
-        Some(config.model.as_str())
-    };
-    config.include_plan_tool = plan_tool_supported(config.model_provider_id.as_str(), model_slug);
 }
 
 async fn resolve_resume_path(

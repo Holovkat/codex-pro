@@ -623,10 +623,8 @@ impl App {
             refresh_model_metadata(&mut self.config);
             sanitize_reasoning_overrides(&mut self.config);
             sanitize_tool_overrides(&mut self.config);
-            self.chat_widget.set_model_provider(
-                &self.config.model_provider_id,
-                &self.config.model_provider,
-            );
+            self.chat_widget
+                .set_model_provider(&self.config.model_provider_id, &self.config.model_provider);
         } else {
             tracing::warn!(
                 provider_id,

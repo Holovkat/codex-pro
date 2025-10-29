@@ -132,7 +132,9 @@ pub(crate) enum AppEvent {
     },
 
     /// Open the reasoning selection popup after picking a model.
-    OpenReasoningPopup { model: ModelPreset },
+    OpenReasoningPopup {
+        model: ModelPreset,
+    },
 
     /// Update the current approval policy in the running app and widget.
     UpdateAskForApprovalPolicy(AskForApproval),

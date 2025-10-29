@@ -828,12 +828,12 @@ fn task_complete_includes_rate_limits() {
         primary: Some(RateLimitWindow {
             used_percent: 42.0,
             window_minutes: Some(300),
-            resets_at: Some("2025-01-01T00:15:00Z".to_string()),
+            resets_at: Some(1_735_690_500),
         }),
         secondary: Some(RateLimitWindow {
             used_percent: 18.0,
             window_minutes: Some(10_080),
-            resets_at: Some("2025-01-02T00:00:00Z".to_string()),
+            resets_at: Some(1_735_776_000),
         }),
     };
 

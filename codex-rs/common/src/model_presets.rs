@@ -1,6 +1,8 @@
 use codex_app_server_protocol::AuthMode;
 use codex_core::protocol_config_types::ReasoningEffort;
-use codex_core::provider::DEFAULT_OPENAI_PROVIDER_ID;
+
+const OPENAI_PROVIDER_ID: &str = "openai";
+const OPENAI_PROVIDER_LABEL: &str = "OpenAI";
 
 /// A reasoning effort option that can be surfaced for a model.
 #[derive(Debug, Clone)]
@@ -36,9 +38,7 @@ pub struct ModelPreset {
 
 impl ModelPreset {
     pub fn provider_label(&self) -> &str {
-        self.provider_label
-            .as_deref()
-            .unwrap_or(DEFAULT_OPENAI_PROVIDER_ID)
+        self.provider_label.as_deref().unwrap_or(OPENAI_PROVIDER_ID)
     }
 }
 
@@ -66,8 +66,8 @@ fn builtin_presets() -> Vec<ModelPreset> {
                 },
             ],
             is_default: true,
-            provider_id: Some(DEFAULT_OPENAI_PROVIDER_ID.to_string()),
-            provider_label: Some("OpenAI".to_string()),
+            provider_id: Some(OPENAI_PROVIDER_ID.to_string()),
+            provider_label: Some(OPENAI_PROVIDER_LABEL.to_string()),
         },
         ModelPreset {
             id: "gpt-5".to_string(),
@@ -95,8 +95,8 @@ fn builtin_presets() -> Vec<ModelPreset> {
                 },
             ],
             is_default: false,
-            provider_id: Some(DEFAULT_OPENAI_PROVIDER_ID.to_string()),
-            provider_label: Some("OpenAI".to_string()),
+            provider_id: Some(OPENAI_PROVIDER_ID.to_string()),
+            provider_label: Some(OPENAI_PROVIDER_LABEL.to_string()),
         },
     ]
 }

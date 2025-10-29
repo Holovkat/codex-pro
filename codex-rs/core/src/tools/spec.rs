@@ -46,21 +46,11 @@ impl ToolsConfig {
             features,
             allow_tools,
         } = params;
-<<<<<<< HEAD
-        let use_streamable_shell_tool = features.enabled(Feature::StreamableShell) && *allow_tools;
-        let experimental_unified_exec_tool = features.enabled(Feature::UnifiedExec) && *allow_tools;
-        let include_apply_patch_tool =
-            features.enabled(Feature::ApplyPatchFreeform) && *allow_tools;
-        let include_web_search_request =
-            features.enabled(Feature::WebSearchRequest) && *allow_tools;
-        let include_view_image_tool = features.enabled(Feature::ViewImageTool) && *allow_tools;
-=======
         let use_streamable_shell_tool = features.enabled(Feature::StreamableShell);
         let experimental_unified_exec_tool = features.enabled(Feature::UnifiedExec);
         let include_apply_patch_tool = features.enabled(Feature::ApplyPatchFreeform);
         let include_web_search_request = features.enabled(Feature::WebSearchRequest);
         let include_view_image_tool = features.enabled(Feature::ViewImageTool);
->>>>>>> 1b10a3a1b (Enable plan tool by default (#5384))
 
         let shell_type = if use_streamable_shell_tool {
             ConfigShellToolType::Streamable

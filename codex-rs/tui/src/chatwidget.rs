@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use codex_agentic_core::list_models_for_provider_blocking;
 use codex_agentic_core::provider::DEFAULT_OPENAI_PROVIDER_ID;
-use codex_agentic_core::provider::plan_tool_supported;
 use codex_agentic_core::settings;
 use codex_core::config::Config;
 use codex_core::config_types::Notifications;
@@ -120,6 +119,7 @@ use codex_core::model_family::find_family_for_model;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
 use codex_core::protocol_config_types::ReasoningEffort as ReasoningEffortConfig;
+use codex_core::protocol_config_types::ReasoningEffort;
 use codex_file_search::FileMatch;
 use codex_git_tooling::CreateGhostCommitOptions;
 use codex_git_tooling::GhostCommit;
@@ -1744,8 +1744,7 @@ impl ChatWidget {
 
         presets.sort_by(|a, b| {
             (
-                a.provider_label()
-                    .to_ascii_lowercase(),
+                a.provider_label().to_ascii_lowercase(),
                 a.display_name.to_ascii_lowercase(),
             )
                 .cmp(&(
@@ -1828,7 +1827,7 @@ impl ChatWidget {
     /// Open a popup to choose the reasoning effort (stage 2) for the given model.
     pub(crate) fn open_reasoning_popup(&mut self, preset: ModelPreset) {
         let default_effort: ReasoningEffortConfig = preset.default_reasoning_effort;
-        let mut supported = if preset.supported_reasoning_efforts.is_empty() {
+        let supported = if preset.supported_reasoning_efforts.is_empty() {
             vec![ReasoningEffortPreset {
                 effort: preset.default_reasoning_effort,
                 description: String::new(),
@@ -1836,7 +1835,6 @@ impl ChatWidget {
         } else {
             preset.supported_reasoning_efforts.clone()
         };
-        supported.sort_by(|a, b| a.effort.cmp(&b.effort));
 
         struct EffortChoice {
             stored: Option<ReasoningEffortConfig>,
@@ -1896,16 +1894,17 @@ impl ChatWidget {
                 effort_label.push_str(" (default)");
             }
 
-            let description = choice.description.clone();
+            let mut description = choice.description.clone();
 
             let warning = "⚠ High reasoning effort can quickly consume Plus plan rate limits.";
             let show_warning =
                 preset.model == "gpt-5-codex" && effort == ReasoningEffortConfig::High;
-            let selected_description = show_warning.then(|| {
-                description
+            if show_warning {
+                let updated = description
                     .as_ref()
-                    .map_or(warning.to_string(), |d| format!("{d}\n{warning}"))
-            });
+                    .map_or(warning.to_string(), |d| format!("{d}\n{warning}"));
+                description = Some(updated);
+            }
 
             let model_for_action = model_slug.clone();
             let effort_for_action = choice.stored;
@@ -1935,8 +1934,7 @@ impl ChatWidget {
 
             items.push(SelectionItem {
                 name: effort_label,
-                description: description.clone(),
-                selected_description,
+                description,
                 is_current: is_current_model && choice.stored == highlight_choice,
                 actions,
                 dismiss_on_select: true,
@@ -2338,13 +2336,6 @@ pub(crate) fn refresh_model_metadata(config: &mut Config) {
         config.model_max_output_tokens = None;
         config.model_auto_compact_token_limit = None;
     }
-
-    let model_slug = if config.model.is_empty() {
-        None
-    } else {
-        Some(config.model.as_str())
-    };
-    config.include_plan_tool = plan_tool_supported(config.model_provider_id.as_str(), model_slug);
 }
 
 impl WidgetRef for &ChatWidget {
