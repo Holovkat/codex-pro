@@ -81,9 +81,6 @@ use tokio::sync::mpsc::unbounded_channel;
 use tokio::time;
 use tracing::warn;
 
-#[cfg(not(debug_assertions))]
-use crate::history_cell::UpdateAvailableHistoryCell;
-
 const INDEX_STATUS_REFRESH_SECS: u64 = 60;
 const INDEX_TOAST_DURATION_SECS: u64 = 5;
 const INDEX_TOAST_TICK_SECS: u64 = 1;
@@ -516,12 +513,14 @@ impl App {
         let index_worker = IndexWorker::new(cwd.clone(), app_event_tx.clone());
         let index_status = IndexStatusSnapshot::load(&cwd).ok().flatten();
         let settings = settings::global();
+        #[cfg(not(debug_assertions))]
+        let update_config = codex_agentic_core::updates::from_settings(&settings);
         let file_search = FileSearchManager::new(config.cwd.clone(), app_event_tx.clone());
         let last_index_attempt = index_status
             .as_ref()
             .and_then(|snapshot| snapshot.analytics.last_attempt_ts);
         #[cfg(not(debug_assertions))]
-        let upgrade_version = crate::updates::get_upgrade_version(&config);
+        let upgrade_version = crate::updates::get_upgrade_version(&config, &update_config);
 
         let mut app = Self {
             server: conversation_manager,
@@ -560,15 +559,17 @@ impl App {
             Duration::from_secs(INDEX_DELTA_POLL_SECS),
         );
         #[cfg(not(debug_assertions))]
-        if let Some(latest_version) = upgrade_version {
+        if let Some(upgrade_info) = upgrade_version {
+            let update_action = crate::updates::get_update_action();
             app.handle_event(
                 tui,
                 AppEvent::InsertHistoryCell(Box::new(UpdateAvailableHistoryCell::new(
-                    latest_version,
-                    crate::updates::get_update_action(),
+                    upgrade_info.latest_version.clone(),
+                    update_action,
                 ))),
             )
             .await?;
+            app.pending_update_action = update_action;
         }
 
         let tui_events = tui.event_stream();
