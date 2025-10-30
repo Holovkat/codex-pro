@@ -64,7 +64,7 @@ pub(crate) enum AppEvent {
     DiffResult(String),
 
     /// Index worker emitted an event during build.
-    IndexProgress(IndexEvent),
+    IndexStatus(IndexEvent),
 
     /// Refresh cached index status snapshot.
     IndexStatusUpdated(Option<IndexStatusSnapshot>),

@@ -44,7 +44,7 @@ impl IndexWorker {
             let progress_sender = sender.clone();
             let result = task::spawn_blocking(move || {
                 build_with_progress(options, |event| {
-                    progress_sender.send(AppEvent::IndexProgress(event))
+                    progress_sender.send(AppEvent::IndexStatus(event))
                 })
             })
             .await;
@@ -58,13 +58,13 @@ impl IndexWorker {
                     }
                 }
                 Ok(Err(err)) => {
-                    sender.send(AppEvent::IndexProgress(IndexEvent::Error {
+                    sender.send(AppEvent::IndexStatus(IndexEvent::Error {
                         message: err.to_string(),
                     }));
                     sender.send(AppEvent::IndexStatusUpdated(None));
                 }
                 Err(join_err) => {
-                    sender.send(AppEvent::IndexProgress(IndexEvent::Error {
+                    sender.send(AppEvent::IndexStatus(IndexEvent::Error {
                         message: format!("index task join error: {join_err}"),
                     }));
                     sender.send(AppEvent::IndexStatusUpdated(None));

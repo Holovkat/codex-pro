@@ -43,7 +43,10 @@ fn sanitize_directory(lines: Vec<String>) -> Vec<String> {
     lines
         .into_iter()
         .map(|line| {
-            if let (Some(dir_pos), Some(pipe_idx)) = (line.find("Directory: "), line.rfind('│')) {
+            let original_len = line.len();
+            let mut sanitized = if let (Some(dir_pos), Some(pipe_idx)) =
+                (line.find("Directory: "), line.rfind('│'))
+            {
                 let prefix = &line[..dir_pos + "Directory: ".len()];
                 let suffix = &line[pipe_idx..];
                 let content_width = pipe_idx.saturating_sub(dir_pos + "Directory: ".len());
@@ -57,7 +60,22 @@ fn sanitize_directory(lines: Vec<String>) -> Vec<String> {
                 rebuilt
             } else {
                 line
+            };
+            if let Some(version_start) = sanitized.find("(v") {
+                if let Some(bracket_rel) = sanitized[version_start..].find(')') {
+                    let version_end = version_start + bracket_rel + 1;
+                    sanitized.replace_range(version_start..version_end, "(v0.0.0)");
+                }
             }
+            if sanitized.len() < original_len {
+                let padding = " ".repeat(original_len - sanitized.len());
+                if let Some(border_idx) = sanitized.rfind('│') {
+                    sanitized.insert_str(border_idx, &padding);
+                } else {
+                    sanitized.push_str(&padding);
+                }
+            }
+            sanitized
         })
         .collect()
 }

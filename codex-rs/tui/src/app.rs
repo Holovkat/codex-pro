@@ -637,8 +637,7 @@ impl App {
 
     fn start_index_build(&mut self) {
         if self.index_progress.is_some() {
-            self.chat_widget
-                .add_info_message("Index build already running".to_string(), None);
+            self.show_index_toast("Index build already running".to_string());
             return;
         }
         self.index_completion_toast_until = None;
@@ -653,7 +652,7 @@ impl App {
         self.index_worker.spawn_build(options);
     }
 
-    fn on_index_progress(&mut self, event: CoreIndexEvent) {
+    fn on_index_status_event(&mut self, event: CoreIndexEvent) {
         match event {
             CoreIndexEvent::Started { total_files } => {
                 self.index_progress = Some(IndexProgressState {
@@ -681,29 +680,15 @@ impl App {
             }
             CoreIndexEvent::Completed(summary) => {
                 self.index_progress = None;
-                let toast = format!(
+                self.show_index_toast(format!(
                     "Index complete • {} files • {} chunks",
                     summary.total_files, summary.total_chunks
-                );
-                self.index_completion_message = Some(toast);
-                self.index_completion_toast_until =
-                    Some(Instant::now() + Duration::from_secs(INDEX_TOAST_DURATION_SECS));
-                self.chat_widget.add_info_message(
-                    format!(
-                        "Index updated: {} files • {} chunks",
-                        summary.total_files, summary.total_chunks
-                    ),
-                    None,
-                );
+                ));
                 self.reload_index_status_snapshot();
             }
             CoreIndexEvent::Error { message } => {
                 self.index_progress = None;
-                self.index_completion_toast_until = None;
-                self.index_completion_message = None;
-                self.chat_widget
-                    .add_error_message(format!("Index build failed: {message}"));
-                self.refresh_index_status_line();
+                self.show_index_toast(format!("Index build failed: {message}"));
             }
         }
     }
@@ -764,6 +749,13 @@ impl App {
         false
     }
 
+    fn show_index_toast(&mut self, message: String) {
+        self.index_completion_message = Some(message);
+        self.index_completion_toast_until =
+            Some(Instant::now() + Duration::from_secs(INDEX_TOAST_DURATION_SECS));
+        self.refresh_index_status_line();
+    }
+
     fn on_index_delta_detected(&mut self, diff: SnapshotDiff) {
         if !diff.has_changes() {
             return;
@@ -774,7 +766,7 @@ impl App {
             diff.modified.len(),
             diff.removed.len()
         );
-        self.chat_widget.add_info_message(summary, None);
+        self.show_index_toast(summary);
         if self.settings.post_turn_refresh_enabled() && self.index_progress.is_none() {
             self.start_index_build();
         }
@@ -922,8 +914,8 @@ impl App {
                     self.file_search.on_user_query(query);
                 }
             }
-            AppEvent::IndexProgress(progress) => {
-                self.on_index_progress(progress);
+            AppEvent::IndexStatus(progress) => {
+                self.on_index_status_event(progress);
             }
             AppEvent::IndexStatusUpdated(snapshot) => {
                 self.on_index_status_updated(snapshot);
