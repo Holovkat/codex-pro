@@ -69,6 +69,8 @@ pub struct MemoryRecord {
     pub source: MemorySource,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub tool_last_fetched_at: Option<DateTime<Utc>>,
 }
 
 impl MemoryRecord {
@@ -89,6 +91,7 @@ impl MemoryRecord {
             source,
             created_at: now,
             updated_at: now,
+            tool_last_fetched_at: None,
         }
     }
 

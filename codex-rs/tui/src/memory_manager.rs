@@ -109,6 +109,21 @@ impl Drop for AltScreenGuard<'_> {
 struct MemoryRow {
     record: MemoryRecord,
     score: Option<f32>,
+    duplicate_count: usize,
+}
+
+impl MemoryRow {
+    fn new(record: MemoryRecord) -> Self {
+        Self {
+            record,
+            score: None,
+            duplicate_count: 1,
+        }
+    }
+
+    fn bump_duplicate(&mut self) {
+        self.duplicate_count = self.duplicate_count.saturating_add(1);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -674,22 +689,54 @@ impl MemoryManagerState {
     }
 
     fn load_rows(store: &mut GlobalMemoryStore) -> Result<Vec<MemoryRow>> {
-        let mut records = store
+        let records = store
             .load_all()
             .map_err(|err| eyre!("failed to load memory records: {err:#}"))?;
-        records.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        if records.len() > MAX_VISIBLE_ROWS {
-            records.truncate(MAX_VISIBLE_ROWS);
-        }
-        Ok(records
-            .into_iter()
-            .map(|record| MemoryRow {
-                record,
-                score: None,
-            })
-            .collect())
+        Ok(Self::collapse_records(records))
     }
 
+    fn collapse_records(mut records: Vec<MemoryRecord>) -> Vec<MemoryRow> {
+        let mut deduped: Vec<MemoryRow> = Vec::new();
+        let mut index: HashMap<String, usize> = HashMap::new();
+
+        records.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+
+        for record in records {
+            let key = Self::memory_key(&record);
+            if let Some(&idx) = index.get(&key) {
+                deduped[idx].bump_duplicate();
+            } else {
+                index.insert(key, deduped.len());
+                deduped.push(MemoryRow::new(record));
+            }
+        }
+
+        if deduped.len() > MAX_VISIBLE_ROWS {
+            deduped.truncate(MAX_VISIBLE_ROWS);
+        }
+        deduped
+    }
+
+    fn memory_key(record: &MemoryRecord) -> String {
+        let summary = clean_summary(&record.summary)
+            .to_ascii_lowercase()
+            .trim()
+            .to_string();
+        let conversation = record
+            .metadata
+            .conversation_id
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let role = record
+            .metadata
+            .role
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let source = format!("{:?}", record.source);
+        format!("{summary}::{conversation}::{role}::{source}")
+    }
     fn update_filtered(&mut self) {
         self.filtered.clear();
         if self.semantic_hits.is_none() {
@@ -907,7 +954,14 @@ impl MemoryManagerState {
             return Ok(false);
         }
         match key.code {
-            KeyCode::Esc => return Ok(true),
+            KeyCode::Esc => {
+                if self.editing_query {
+                    self.editing_query = false;
+                    self.request_redraw(tui);
+                    return Ok(false);
+                }
+                return Ok(true);
+            }
             KeyCode::Up => {
                 if self.cursor > 0 {
                     self.cursor -= 1;
@@ -924,14 +978,14 @@ impl MemoryManagerState {
             KeyCode::PageDown => {
                 self.cursor = (self.cursor + 10).min(self.filtered.len().saturating_sub(1));
             }
-            KeyCode::Char('s') if key.modifiers.is_empty() => {
-                self.editing_query = !self.editing_query;
-            }
             KeyCode::Char(c) if self.editing_query && key.modifiers.is_empty() => {
                 self.query.push(c);
                 if let Err(err) = self.run_semantic_search().await {
                     self.status = Some(StatusLine::error(err.to_string()));
                 }
+            }
+            KeyCode::Char('s') if key.modifiers.is_empty() && !self.editing_query => {
+                self.editing_query = true;
             }
             KeyCode::Backspace if self.editing_query => {
                 self.query.pop();
@@ -1085,9 +1139,9 @@ impl MemoryManagerState {
             let layout = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(4),
-                    Constraint::Min(10),
-                    Constraint::Length(2),
+                    Constraint::Length(6),
+                    Constraint::Min(8),
+                    Constraint::Length(3),
                 ])
                 .split(size);
             self.draw_header(
@@ -1217,7 +1271,7 @@ impl MemoryManagerState {
         }
 
         let mut lines: Vec<Line<'static>> = Vec::new();
-        let summary_width = inner.width.saturating_sub(52).max(8) as usize;
+        let summary_width = inner.width.saturating_sub(56).max(8) as usize;
         for (position, idx) in filtered.iter().enumerate() {
             if let Some(row) = rows.get(*idx) {
                 let record = &row.record;
@@ -1236,15 +1290,25 @@ impl MemoryManagerState {
                 } else {
                     record.metadata.tags.join(", ")
                 };
-                let mut summary = truncate_text(&clean_summary(&record.summary), summary_width);
+                let mut summary_text = clean_summary(&record.summary);
+                if row.duplicate_count > 1 {
+                    summary_text = format!("{summary_text} (×{})", row.duplicate_count);
+                }
                 if let Some(semantic) = semantic
                     && let Some((_, score)) =
                         semantic.iter().find(|(id, _)| id == &record.record_id)
                 {
-                    summary = format!("{summary}  (score {score:.2})");
+                    summary_text = format!("{summary_text}  (score {score:.2})");
                 }
+                let summary = truncate_text(&summary_text, summary_width);
+                let tool_marker: Span<'static> = if record.tool_last_fetched_at.is_some() {
+                    "[t]".cyan()
+                } else {
+                    "[ ]".dim()
+                };
                 let mut line = Line::from(vec![
                     marker.to_string().into(),
+                    tool_marker,
                     " ".into(),
                     timestamp.into(),
                     "  ".into(),
@@ -1334,6 +1398,8 @@ impl MemoryManagerState {
             "[+/-] CF".into(),
             "   ".into(),
             "[Space] toggle".into(),
+            "   ".into(),
+            "[t] tool call".into(),
             "   ".into(),
             "[A] select all".into(),
             "   ".into(),
@@ -1761,6 +1827,7 @@ mod tests {
     use super::*;
     use crate::custom_terminal::Terminal;
     use crate::test_backend::VT100Backend;
+    use chrono::Duration;
     use chrono::TimeZone;
     use chrono::Utc;
     use codex_core::memory::MemorySettingsManager;
@@ -1796,6 +1863,51 @@ mod tests {
             model,
             embedder,
         }
+    }
+
+    #[test]
+    fn collapse_records_merges_duplicates() {
+        let mut first = MemoryRecord::new(
+            "Greeted the assistant with hi".to_string(),
+            vec![0.1, 0.2],
+            MemoryMetadata {
+                conversation_id: Some("thread-1".to_string()),
+                ..MemoryMetadata::default()
+            },
+            0.75,
+            MemorySource::UserMessage,
+        );
+        let now = Utc.with_ymd_and_hms(2025, 1, 10, 9, 0, 0).unwrap();
+        first.created_at = now;
+        first.updated_at = now;
+
+        let mut duplicate = first.clone();
+        duplicate.record_id = Uuid::now_v7();
+        duplicate.updated_at = now + Duration::seconds(30);
+
+        let mut other = MemoryRecord::new(
+            "Captured a follow-up question".to_string(),
+            vec![0.3, 0.4],
+            MemoryMetadata::default(),
+            0.8,
+            MemorySource::AssistantMessage,
+        );
+        other.created_at = now + Duration::seconds(60);
+        other.updated_at = other.created_at;
+
+        let rows = MemoryManagerState::collapse_records(vec![first.clone(), duplicate, other]);
+        assert_eq!(rows.len(), 2);
+        let primary = &rows[0];
+        assert_eq!(
+            primary.record.summary, "Captured a follow-up question",
+            "Most recent record should stay first in the list"
+        );
+        let greeting = &rows[1];
+        assert_eq!(greeting.duplicate_count, 2);
+        assert_eq!(
+            clean_summary(&greeting.record.summary),
+            clean_summary(&first.summary)
+        );
     }
 
     async fn seed_records(runtime: &MemoryRuntime) -> MemoryRecord {

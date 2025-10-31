@@ -1042,7 +1042,7 @@ impl RuntimeState {
         if command == "/search-code" && args.is_empty() {
             let confidence = settings::global().search_confidence_min_percent();
             let usage = format!(
-                "Usage: /search-code <query>\nSemantic search matches meaning, not regex (patterns like .* are ignored).\nUse function names, doc phrases, or natural text (e.g. /search-code \"load_config error handling\").\nQuote multi-word queries for clarity.\nCurrent minimum confidence: {confidence}%\nAdjust the threshold with `codex search-code --min-confidence <percent>` or edit `.codex/settings.json` (or `~/.codex/settings.json`)."
+                "Usage: /search-code <query>\nSemantic search matches meaning (not regex) across the indexed workspace.\nResults below {confidence}% confidence are hidden by default.\nUse function names, doc phrases, or natural text (e.g. /search-code \"load_config error handling\").\nQuote multi-word queries for clarity.\nAdjust the threshold with `codex search-code --min-confidence <percent>` or edit `.codex/settings.json` (or `~/.codex/settings.json`)."
             );
             self.send_agent_message(session_id, &usage, writer).await?;
             send_response(writer, id, json!({ "stopReason": "end_turn" })).await?;

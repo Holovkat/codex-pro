@@ -519,6 +519,40 @@ fn create_read_file_tool() -> ToolSpec {
     })
 }
 
+fn create_memory_fetch_tool() -> ToolSpec {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "ids".to_string(),
+        JsonSchema::Array {
+            items: Box::new(JsonSchema::String {
+                description: Some("UUID of a memory record (as shown in the glossary)".to_string()),
+            }),
+            description: Some(
+                "List of memory record IDs to fetch. Use the identifiers emitted in the prompt glossary."
+                    .to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "id".to_string(),
+        JsonSchema::String {
+            description: Some("Shortcut for fetching a single memory record by UUID.".to_string()),
+        },
+    );
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "memory_fetch".to_string(),
+        description: "Retrieve stored memory summaries by ID. Use the IDs provided in the prompt glossary and call this tool when more detail is required."
+            .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: None,
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
 fn create_list_dir_tool() -> ToolSpec {
     let mut properties = BTreeMap::new();
     properties.insert(
@@ -875,6 +909,7 @@ pub(crate) fn build_specs(
     use crate::tools::handlers::ListDirHandler;
     use crate::tools::handlers::McpHandler;
     use crate::tools::handlers::McpResourceHandler;
+    use crate::tools::handlers::MemoryFetchHandler;
     use crate::tools::handlers::PlanHandler;
     use crate::tools::handlers::ReadFileHandler;
     use crate::tools::handlers::ShellHandler;
@@ -892,6 +927,7 @@ pub(crate) fn build_specs(
     let view_image_handler = Arc::new(ViewImageHandler);
     let mcp_handler = Arc::new(McpHandler);
     let mcp_resource_handler = Arc::new(McpResourceHandler);
+    let memory_fetch_handler = Arc::new(MemoryFetchHandler);
 
     let use_unified_exec = config.experimental_unified_exec_tool
         || matches!(config.shell_type, ConfigShellToolType::Streamable);
@@ -928,6 +964,9 @@ pub(crate) fn build_specs(
 
     builder.push_spec(PLAN_TOOL.clone());
     builder.register_handler("update_plan", plan_handler);
+
+    builder.push_spec_with_parallel_support(create_memory_fetch_tool(), true);
+    builder.register_handler("memory_fetch", memory_fetch_handler);
 
     if let Some(apply_patch_tool_type) = &config.apply_patch_tool_type {
         match apply_patch_tool_type {
@@ -1142,6 +1181,7 @@ mod tests {
             create_list_mcp_resource_templates_tool(),
             create_read_mcp_resource_tool(),
             PLAN_TOOL.clone(),
+            create_memory_fetch_tool(),
             create_apply_patch_freeform_tool(),
             ToolSpec::WebSearch {},
             create_view_image_tool(),
@@ -1188,6 +1228,7 @@ mod tests {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
+                "memory_fetch",
                 "web_search",
                 "view_image",
             ]

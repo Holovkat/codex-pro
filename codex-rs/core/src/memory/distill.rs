@@ -304,7 +304,7 @@ impl MemoryRuntime {
     }
 
     pub async fn fetch_records(&self, ids: &[Uuid]) -> Result<Vec<MemoryRecord>> {
-        let store = self.store.lock().await;
+        let mut store = self.store.lock().await;
         store.fetch(ids).context("fetch memory records")
     }
 

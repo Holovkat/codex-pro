@@ -47,7 +47,9 @@ impl SlashCommand {
             SlashCommand::Undo => "restore the workspace to the last Codex snapshot",
             SlashCommand::Quit => "exit Codex",
             SlashCommand::IndexBuild => "rebuild the semantic index",
-            SlashCommand::SearchCode => "search indexed code or adjust search settings",
+            SlashCommand::SearchCode => {
+                "run semantic code search and adjust the confidence threshold"
+            }
             SlashCommand::Diff => "show git diff (including untracked files)",
             SlashCommand::Mention => "mention a file",
             SlashCommand::Status => "show current session configuration and token usage",

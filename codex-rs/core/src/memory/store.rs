@@ -1,4 +1,7 @@
 use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::hash_map::Entry;
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -45,6 +48,7 @@ pub struct GlobalMemoryStore {
     records: Vec<MemoryRecord>,
     metrics: MemoryMetrics,
     last_rebuild_at: Option<chrono::DateTime<Utc>>,
+    dedupe_keys: HashSet<String>,
 }
 
 impl GlobalMemoryStore {
@@ -83,8 +87,11 @@ impl GlobalMemoryStore {
         let manifest_clone = manifest.clone();
         let metrics_clone = metrics_path.clone();
 
-        let records = task::spawn_blocking(move || load_records(&manifest_clone)).await??;
+        let mut records = task::spawn_blocking(move || load_records(&manifest_clone)).await??;
+        let removed_duplicates = prune_records(&mut records);
         let metrics = task::spawn_blocking(move || load_metrics(&metrics_clone)).await??;
+
+        let dedupe_keys = records.iter().map(dedupe_key).collect();
 
         let mut store = Self {
             root,
@@ -95,7 +102,12 @@ impl GlobalMemoryStore {
             records,
             metrics,
             last_rebuild_at: None,
+            dedupe_keys,
         };
+
+        if removed_duplicates > 0 {
+            write_all_records(&store.manifest, &store.records)?;
+        }
 
         if !store.records.is_empty() {
             store.rebuild()?;
@@ -108,6 +120,10 @@ impl GlobalMemoryStore {
 
     pub fn append(&mut self, mut record: MemoryRecord) -> Result<()> {
         let _lock = self.acquire_lock()?;
+        let key = dedupe_key(&record);
+        if !self.dedupe_keys.insert(key) {
+            return Ok(());
+        }
         self.align_embedding(&mut record.embedding)?;
         append_manifest_record(&self.manifest, &record)?;
         self.records.push(record);
@@ -122,6 +138,7 @@ impl GlobalMemoryStore {
             .position(|record| record.record_id == record_id)
             .ok_or_else(|| anyhow!("memory record {record_id} not found"))?;
         let mut current = self.records[position].clone();
+        let old_key = dedupe_key(&current);
         if let Some(summary) = update.summary {
             current.summary = summary;
         }
@@ -143,6 +160,8 @@ impl GlobalMemoryStore {
         current.updated_at = Utc::now();
         self.records[position] = current.clone();
         write_all_records(&self.manifest, &self.records)?;
+        self.dedupe_keys.remove(&old_key);
+        self.dedupe_keys.insert(dedupe_key(&current));
         self.rebuild_index_unlocked()?;
         Ok(current)
     }
@@ -156,6 +175,7 @@ impl GlobalMemoryStore {
         {
             let removed = self.records.remove(position);
             write_all_records(&self.manifest, &self.records)?;
+            self.dedupe_keys.remove(&dedupe_key(&removed));
             self.rebuild_index_unlocked()?;
             return Ok(Some(removed));
         }
@@ -174,6 +194,7 @@ impl GlobalMemoryStore {
         self.metrics = MemoryMetrics::default();
         self.persist_metrics_unlocked()?;
         self.last_rebuild_at = None;
+        self.dedupe_keys.clear();
         Ok(())
     }
 
@@ -182,13 +203,31 @@ impl GlobalMemoryStore {
         self.rebuild_index_unlocked()
     }
 
-    pub fn fetch(&self, ids: &[Uuid]) -> Result<Vec<MemoryRecord>> {
+    pub fn fetch(&mut self, ids: &[Uuid]) -> Result<Vec<MemoryRecord>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let _lock = self.acquire_lock()?;
         let mut results = Vec::new();
+        let mut updated = false;
+
         for id in ids {
-            if let Some(record) = self.records.iter().find(|record| &record.record_id == id) {
+            if let Some(record) = self
+                .records
+                .iter_mut()
+                .find(|record| &record.record_id == id)
+            {
+                record.tool_last_fetched_at = Some(Utc::now());
                 results.push(record.clone());
+                updated = true;
             }
         }
+
+        if updated {
+            write_all_records(&self.manifest, &self.records)?;
+        }
+
         Ok(results)
     }
 
@@ -466,6 +505,76 @@ fn adjust_embedding_dimension(values: &mut Vec<f32>, target: usize) {
     }
 }
 
+fn dedupe_key(record: &MemoryRecord) -> String {
+    let summary = record.summary.trim().to_ascii_lowercase();
+    let conversation = record
+        .metadata
+        .conversation_id
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let role = record
+        .metadata
+        .role
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let source = format!("{:?}", record.source);
+    format!("{summary}::{conversation}::{role}::{source}")
+}
+
+fn prune_records(records: &mut Vec<MemoryRecord>) -> usize {
+    if records.is_empty() {
+        return 0;
+    }
+
+    let mut newest_indices: HashMap<String, usize> = HashMap::new();
+
+    for (idx, record) in records.iter().enumerate() {
+        let key = dedupe_key(record);
+        match newest_indices.entry(key) {
+            Entry::Vacant(entry) => {
+                entry.insert(idx);
+            }
+            Entry::Occupied(mut entry) => {
+                let current_idx = *entry.get();
+                if should_replace(&records[current_idx], record) {
+                    entry.insert(idx);
+                }
+            }
+        }
+    }
+
+    if newest_indices.len() == records.len() {
+        return 0;
+    }
+
+    let mut keep_flags = vec![false; records.len()];
+    for idx in newest_indices.into_values() {
+        keep_flags[idx] = true;
+    }
+    let removed = keep_flags.iter().filter(|flag| !**flag).count();
+    let mut cursor = 0;
+    records.retain(|_| {
+        let keep = keep_flags[cursor];
+        cursor += 1;
+        keep
+    });
+    removed
+}
+
+fn should_replace(current: &MemoryRecord, candidate: &MemoryRecord) -> bool {
+    match candidate.updated_at.cmp(&current.updated_at) {
+        Ordering::Greater => true,
+        Ordering::Less => false,
+        Ordering::Equal => match candidate.created_at.cmp(&current.created_at) {
+            Ordering::Greater => true,
+            Ordering::Less => false,
+            Ordering::Equal => true,
+        },
+    }
+}
+
 impl GlobalMemoryStore {
     fn align_embedding(&mut self, embedding: &mut Vec<f32>) -> Result<usize> {
         if embedding.is_empty() {
@@ -524,6 +633,7 @@ mod tests {
     use crate::memory::types::MemoryRecord;
     use crate::memory::types::MemoryRecordUpdate;
     use crate::memory::types::MemorySource;
+    use chrono::Duration;
 
     fn sample_record(summary: &str) -> MemoryRecord {
         MemoryRecord::new(
@@ -624,5 +734,151 @@ mod tests {
         assert_eq!(records[0].embedding.len(), 4);
         assert_eq!(records[1].embedding.len(), 4);
         store.rebuild().expect("rebuild");
+    }
+
+    #[tokio::test]
+    async fn duplicate_records_are_ignored() {
+        let tmp = tempfile::tempdir().expect("tmp dir");
+        let mut store = GlobalMemoryStore::open(tmp.path().join("memory"))
+            .await
+            .expect("open");
+        store
+            .append(sample_record("Repeated greeting"))
+            .expect("append");
+        store
+            .append(sample_record("Repeated greeting"))
+            .expect("append duplicate");
+        let records = store.load_all().expect("load");
+        assert_eq!(records.len(), 1, "duplicate summaries should be skipped");
+    }
+
+    #[tokio::test]
+    async fn fetch_updates_tool_last_fetched_at() {
+        let tmp = tempfile::tempdir().expect("tmp dir");
+        let mut store = GlobalMemoryStore::open(tmp.path().join("memory"))
+            .await
+            .expect("open");
+        let record = sample_record("Fetch me");
+        let record_id = record.record_id;
+        store.append(record).expect("append");
+
+        let before = store.load_all().expect("load before fetch");
+        assert_eq!(before.len(), 1);
+        assert!(
+            before[0].tool_last_fetched_at.is_none(),
+            "tool_last_fetched_at should start empty"
+        );
+
+        let fetched = store.fetch(&[record_id]).expect("fetch");
+        assert_eq!(fetched.len(), 1);
+        assert!(
+            fetched[0].tool_last_fetched_at.is_some(),
+            "fetch should populate tool_last_fetched_at"
+        );
+
+        drop(store);
+
+        let reopened = GlobalMemoryStore::open(tmp.path().join("memory"))
+            .await
+            .expect("reopen");
+        let persisted = reopened.load_all().expect("load after reopen");
+        assert_eq!(persisted.len(), 1);
+        assert!(
+            persisted[0].tool_last_fetched_at.is_some(),
+            "tool fetch timestamp should persist in manifest"
+        );
+    }
+
+    #[test]
+    fn prune_records_keeps_newest_entries() {
+        let mut older = sample_record("Hello again");
+        older.created_at = older.created_at - Duration::minutes(10);
+        older.updated_at = older.created_at;
+
+        let mut newest = sample_record("Hello again");
+        newest.created_at = older.created_at + Duration::minutes(5);
+        newest.updated_at = newest.created_at + Duration::seconds(30);
+
+        let mut records = vec![older.clone(), newest.clone()];
+        let removed = prune_records(&mut records);
+
+        assert_eq!(removed, 1);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].record_id, newest.record_id);
+    }
+
+    #[test]
+    fn prune_records_breaks_ties_with_created_at_and_position() {
+        let mut first = sample_record("Same summary");
+        let mut second = sample_record("Same summary");
+
+        let baseline = first.created_at;
+        first.created_at = baseline - Duration::minutes(2);
+        first.updated_at = baseline;
+
+        second.created_at = baseline - Duration::minutes(1);
+        second.updated_at = baseline;
+
+        let mut records = vec![first.clone(), second.clone()];
+        let removed = prune_records(&mut records);
+
+        assert_eq!(removed, 1);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].record_id, second.record_id);
+
+        // Ensure that when timestamps fully match we still keep the later occurrence.
+        let identical_a = sample_record("identical");
+        let mut identical_b = identical_a.clone();
+        identical_b.record_id = Uuid::now_v7();
+        identical_b.created_at = identical_a.created_at;
+        identical_b.updated_at = identical_a.updated_at;
+
+        let mut identical_records = vec![identical_a.clone(), identical_b.clone()];
+        let identical_removed = prune_records(&mut identical_records);
+
+        assert_eq!(identical_removed, 1);
+        assert_eq!(identical_records[0].record_id, identical_b.record_id);
+    }
+
+    #[tokio::test]
+    async fn open_rewrites_manifest_after_pruning_duplicates() {
+        let tmp = tempfile::tempdir().expect("tmp dir");
+        let root = tmp.path().join("memory");
+        std::fs::create_dir_all(&root).expect("create memory dir");
+        let manifest_path = root.join(MANIFEST_FILENAME);
+
+        let mut older = sample_record("Repeated hello");
+        older.created_at = older.created_at - Duration::minutes(30);
+        older.updated_at = older.created_at;
+
+        let mut newer = sample_record("Repeated hello");
+        newer.created_at = older.created_at + Duration::minutes(5);
+        newer.updated_at = newer.created_at + Duration::seconds(10);
+        let expected_id = newer.record_id;
+
+        {
+            let mut file = std::fs::File::create(&manifest_path).expect("create manifest");
+            serde_json::to_writer(&mut file, &older).expect("write older");
+            file.write_all(b"\n").expect("newline");
+            serde_json::to_writer(&mut file, &newer).expect("write newer");
+            file.write_all(b"\n").expect("newline");
+            file.flush().expect("flush manifest");
+        }
+
+        let store = GlobalMemoryStore::open(root.clone())
+            .await
+            .expect("open store");
+        let records = store.load_all().expect("load pruned records");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].record_id, expected_id);
+
+        let manifest_contents =
+            std::fs::read_to_string(&manifest_path).expect("read manifest after pruning");
+        assert_eq!(manifest_contents.lines().count(), 1);
+        assert!(
+            manifest_contents.contains(&expected_id.to_string()),
+            "manifest should retain the newest memory id"
+        );
     }
 }

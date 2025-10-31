@@ -61,11 +61,11 @@ fn sanitize_directory(lines: Vec<String>) -> Vec<String> {
             } else {
                 line
             };
-            if let Some(version_start) = sanitized.find("(v") {
-                if let Some(bracket_rel) = sanitized[version_start..].find(')') {
-                    let version_end = version_start + bracket_rel + 1;
-                    sanitized.replace_range(version_start..version_end, "(v0.0.0)");
-                }
+            if let Some(version_start) = sanitized.find("(v")
+                && let Some(bracket_rel) = sanitized[version_start..].find(')')
+            {
+                let version_end = version_start + bracket_rel + 1;
+                sanitized.replace_range(version_start..version_end, "(v0.0.0)");
             }
             if sanitized.len() < original_len {
                 let padding = " ".repeat(original_len - sanitized.len());

@@ -1035,12 +1035,25 @@ impl Session {
                 }
                 if retrieval.settings.preview_mode.requires_user_confirmation() {
                     if let Some(state_arc) = turn_state_arc {
+                        let filtered_candidates = {
+                            let state_guard = self.state.lock().await;
+                            retrieval
+                                .candidates
+                                .iter()
+                                .filter(|&hit| {
+                                    !state_guard.has_memory_injected(&hit.record.record_id)
+                                })
+                                .cloned()
+                                .collect::<Vec<_>>()
+                        };
+                        if filtered_candidates.is_empty() {
+                            return;
+                        }
                         {
                             let mut ts = state_arc.lock().await;
-                            ts.set_memory_preview_hits(retrieval.candidates.clone());
+                            ts.set_memory_preview_hits(filtered_candidates.clone());
                         }
-                        let entries = retrieval
-                            .candidates
+                        let entries = filtered_candidates
                             .iter()
                             .map(|hit| MemoryPreviewEntry {
                                 record_id: hit.record.record_id.to_string(),
@@ -1066,14 +1079,24 @@ impl Session {
                     if selected.is_empty() {
                         return;
                     }
+                    let filtered = {
+                        let mut state = self.state.lock().await;
+                        selected
+                            .into_iter()
+                            .filter(|hit| state.mark_memory_injected(hit.record.record_id))
+                            .collect::<Vec<_>>()
+                    };
+                    if filtered.is_empty() {
+                        return;
+                    }
                     if let Err(err) = retriever.record_preview_outcome(true).await {
                         warn!("failed to record memory preview acceptance: {err:#}");
                     }
                     let text =
-                        format_memory_hits_message(retrieval.settings.min_confidence, &selected);
+                        format_memory_hits_message(retrieval.settings.min_confidence, &filtered);
                     turn_input.push(ResponseItem::Message {
                         id: None,
-                        role: "system".to_string(),
+                        role: "assistant".to_string(),
                         content: vec![ContentItem::OutputText { text }],
                     });
                     if let Some(state_arc) = turn_state_arc {
@@ -1292,6 +1315,10 @@ impl Session {
 
     fn show_raw_agent_reasoning(&self) -> bool {
         self.services.show_raw_agent_reasoning
+    }
+
+    pub(crate) fn memory_runtime(&self) -> Option<MemoryRuntime> {
+        self.memory_runtime.clone()
     }
 }
 
@@ -1514,8 +1541,17 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                             .into_iter()
                             .filter(|hit| accepted_set.contains(&hit.record.record_id))
                             .collect();
+                        let mut filtered_hits = Vec::new();
+                        if !accepted_hits.is_empty() {
+                            let mut state = sess.state.lock().await;
+                            for hit in accepted_hits {
+                                if state.mark_memory_injected(hit.record.record_id) {
+                                    filtered_hits.push(hit);
+                                }
+                            }
+                        }
                         let retriever = MemoryRetriever::new(runtime.clone());
-                        if accepted_hits.is_empty() {
+                        if filtered_hits.is_empty() {
                             if let Err(err) = retriever.record_preview_outcome(false).await {
                                 warn!("failed to record memory preview skip: {err:#}");
                             }
@@ -1524,9 +1560,9 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                                 warn!("failed to record memory preview acceptance: {err:#}");
                             }
                             let min_conf = runtime.settings.get().await.min_confidence;
-                            let text = format_memory_hits_message(min_conf, &accepted_hits);
+                            let text = format_memory_hits_message(min_conf, &filtered_hits);
                             let message_input = ResponseInputItem::Message {
-                                role: "system".to_string(),
+                                role: "assistant".to_string(),
                                 content: vec![ContentItem::OutputText { text }],
                             };
                             let mut active = sess.active_turn.lock().await;
@@ -1977,15 +2013,17 @@ fn latest_user_message_text(items: &[ResponseItem]) -> Option<String> {
 fn format_memory_hits_message(min_confidence: f32, hits: &[MemoryHit]) -> String {
     let mut lines = Vec::with_capacity(hits.len().saturating_add(1));
     lines.push(format!(
-        "Relevant memories (confidence ≥ {:.0}%):",
+        "Relevant memories (confidence ≥ {:.0}%). Use memory_fetch(\"<memory-id>\") for details:",
         min_confidence * 100.0
     ));
     for hit in hits {
+        let summary = hit.record.summary.trim();
         lines.push(format!(
-            "- ({:.0}% · score {:.2}) {}",
+            "- [{}] {} (confidence {:.0}% · score {:.2})",
+            hit.record.record_id,
+            summary,
             hit.record.confidence * 100.0,
-            hit.score,
-            hit.record.summary
+            hit.score
         ));
     }
     lines.join("\n")

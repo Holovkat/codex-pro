@@ -32,7 +32,10 @@ fn register_cli_overrides(registry: &mut CommandRegistry) {
     );
     registry.register_with_descriptor(
         "search-code",
-        Some("Search code using semantic index (supports --min-confidence)".to_string()),
+        Some(
+            "Run semantic code search and filter results below the confidence threshold"
+                .to_string(),
+        ),
         search_command,
     );
     registry.register_with_descriptor(

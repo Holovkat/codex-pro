@@ -30,7 +30,22 @@ impl MemorySettingsManager {
     }
 
     pub async fn get(&self) -> MemorySettings {
-        self.state.read().await.clone()
+        match tokio::fs::read(&self.path).await {
+            Ok(bytes) => match serde_json::from_slice::<MemorySettings>(&bytes) {
+                Ok(fresh) => {
+                    let mut guard = self.state.write().await;
+                    if *guard != fresh {
+                        *guard = fresh;
+                    }
+                    guard.clone()
+                }
+                Err(_) => self.state.read().await.clone(),
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                self.state.read().await.clone()
+            }
+            Err(_) => self.state.read().await.clone(),
+        }
     }
 
     pub async fn set(&self, new_settings: MemorySettings) -> Result<MemorySettings> {
@@ -71,6 +86,7 @@ impl MemorySettingsManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::MemoryPreviewMode;
 
     #[tokio::test]
     async fn loads_default_settings_when_missing() {
@@ -100,5 +116,27 @@ mod tests {
             .expect("reload");
         let settings = reloaded.get().await;
         assert!((settings.min_confidence - 0.9).abs() < f32::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn get_reloads_external_changes() {
+        let dir = tempfile::tempdir().expect("tmp dir");
+        let manager = MemorySettingsManager::load(dir.path().to_path_buf())
+            .await
+            .expect("load");
+
+        let mut updated = manager.get().await;
+        updated.preview_mode = MemoryPreviewMode::Disabled;
+        updated.min_confidence = 0.8;
+        updated.max_tokens = 512;
+        updated.retention_days = 45;
+
+        let raw = serde_json::to_vec_pretty(&updated).expect("serialize settings");
+        tokio::fs::write(manager.path.clone(), raw)
+            .await
+            .expect("write updated settings");
+
+        let reloaded = manager.get().await;
+        assert_eq!(reloaded, updated);
     }
 }

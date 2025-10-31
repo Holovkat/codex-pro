@@ -7,8 +7,8 @@ expression: screen
 │CF ≥  75% [+/-]                                                                                                       │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌Recent Memories───────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│[x] 2025-01-02 19:30   91%  cli, docs  Summarise CLI install steps for offline docs                                   │
-│[x] 2025-01-01 23:00   82%  product, onboarding  Review onboarding flow for regression notes                          │
+│[x][ ] 2025-01-02 19:30   91%  cli, docs  Summarise CLI install steps for offline docs                                │
+│[x][ ] 2025-01-01 23:00   82%  product, onboarding  Review onboarding flow for regression notes                       │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
@@ -30,5 +30,5 @@ expression: screen
 │                                                                                                                      │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-[+/-] CF   [Space] toggle   [A] select all   [N] new   [Enter] edit   [D] delete   [R] rebuild   [Shift+R] reset   [Esc]
+[+/-] CF   [Space] toggle   [t] tool call   [A] select all   [N] new   [Enter] edit   [D] delete   [R] rebuild   [Shift+
 Memories: 2

@@ -1,6 +1,8 @@
 //! Session-wide mutable state.
 
 use codex_protocol::models::ResponseItem;
+use std::collections::HashSet;
+use uuid::Uuid;
 
 use crate::codex::SessionConfiguration;
 use crate::conversation_history::ConversationHistory;
@@ -13,6 +15,7 @@ pub(crate) struct SessionState {
     pub(crate) session_configuration: SessionConfiguration,
     pub(crate) history: ConversationHistory,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
+    memory_ids_injected: HashSet<Uuid>,
 }
 
 impl SessionState {
@@ -22,6 +25,7 @@ impl SessionState {
             session_configuration,
             history: ConversationHistory::new(),
             latest_rate_limits: None,
+            memory_ids_injected: HashSet::new(),
         }
     }
 
@@ -71,5 +75,13 @@ impl SessionState {
 
     pub(crate) fn set_token_usage_full(&mut self, context_window: i64) {
         self.history.set_token_usage_full(context_window);
+    }
+
+    pub(crate) fn has_memory_injected(&self, id: &Uuid) -> bool {
+        self.memory_ids_injected.contains(id)
+    }
+
+    pub(crate) fn mark_memory_injected(&mut self, id: Uuid) -> bool {
+        self.memory_ids_injected.insert(id)
     }
 }
