@@ -15,6 +15,7 @@ use codex_file_search::FileMatch;
 
 use crate::bottom_pane::ApprovalRequest;
 use crate::history_cell::HistoryCell;
+use crate::history_cell::MemorySuggestionEntry;
 use crate::index_delta::SnapshotDiff;
 use crate::index_status::IndexStatusSnapshot;
 
@@ -87,11 +88,19 @@ pub(crate) enum AppEvent {
     /// Prompt for a search query.
     SearchCodePrompt,
 
+    /// Prompt for a memory suggest query.
+    MemorySuggestPrompt,
+
     /// Prompt for a new minimum confidence value.
     SearchConfidencePrompt,
 
     /// Request to run a semantic code search for the given query.
     SearchCodeRequested {
+        query: String,
+    },
+
+    /// Request to suggest relevant stored memories.
+    MemorySuggestRequested {
         query: String,
     },
 
@@ -109,6 +118,19 @@ pub(crate) enum AppEvent {
 
     /// Error while running a `/search-code` query.
     SearchCodeError {
+        query: String,
+        error: String,
+    },
+
+    /// Completed memory suggestions for the given query.
+    MemorySuggestResult {
+        query: String,
+        min_confidence: f32,
+        entries: Vec<MemorySuggestionEntry>,
+    },
+
+    /// Error while suggesting memories.
+    MemorySuggestError {
         query: String,
         error: String,
     },

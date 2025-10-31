@@ -13,6 +13,7 @@ pub enum SlashCommand {
     #[strum(serialize = "index")]
     IndexBuild,
     SearchCode,
+    MemorySuggest,
     // DO NOT ALPHA-SORT! Enum order is presentation order in the popup, so
     // more frequently used commands should be listed first.
     Model,
@@ -50,6 +51,7 @@ impl SlashCommand {
             SlashCommand::SearchCode => {
                 "run semantic code search and adjust the confidence threshold"
             }
+            SlashCommand::MemorySuggest => "list stored memories related to the current question",
             SlashCommand::Diff => "show git diff (including untracked files)",
             SlashCommand::Mention => "mention a file",
             SlashCommand::Status => "show current session configuration and token usage",
@@ -86,6 +88,7 @@ impl SlashCommand {
             | SlashCommand::IndexBuild => false,
             SlashCommand::Diff
             | SlashCommand::SearchCode
+            | SlashCommand::MemorySuggest
             | SlashCommand::Mention
             | SlashCommand::Status
             | SlashCommand::Mcp
@@ -99,7 +102,7 @@ impl SlashCommand {
     }
 
     pub fn accepts_args(self) -> bool {
-        matches!(self, SlashCommand::SearchCode)
+        matches!(self, SlashCommand::SearchCode | SlashCommand::MemorySuggest)
     }
 }
 

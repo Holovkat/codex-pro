@@ -1527,6 +1527,82 @@ impl HistoryCell for SearchResultsCell {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct MemorySuggestionEntry {
+    pub record_id: String,
+    pub summary: String,
+    pub confidence_percent: u8,
+    pub score: f32,
+}
+
+#[derive(Debug)]
+struct MemorySuggestionsCell {
+    query: String,
+    min_confidence_percent: u8,
+    entries: Vec<MemorySuggestionEntry>,
+}
+
+pub(crate) fn new_memory_suggestions(
+    query: String,
+    min_confidence_percent: u8,
+    entries: Vec<MemorySuggestionEntry>,
+) -> Box<dyn HistoryCell> {
+    Box::new(MemorySuggestionsCell {
+        query,
+        min_confidence_percent,
+        entries,
+    })
+}
+
+impl HistoryCell for MemorySuggestionsCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        let header = format!(
+            "Memory suggestions for \"{}\" (confidence ≥ {}%)",
+            self.query, self.min_confidence_percent
+        );
+        lines.push(Line::from(header.bold()));
+
+        if self.entries.is_empty() {
+            lines.push(Line::from("No stored memories met the threshold.".dim()));
+            return lines;
+        }
+
+        for entry in &self.entries {
+            lines.push(Line::from(vec![
+                "-".into(),
+                " ".into(),
+                format!("[{}]", entry.record_id).cyan(),
+                " ".into(),
+                format!("{:>3}%", entry.confidence_percent).cyan(),
+                " ".into(),
+                format!("score {:.2}", entry.score).dim(),
+            ]));
+
+            if !entry.summary.is_empty() {
+                let wrap_width = width.saturating_sub(4).max(1) as usize;
+                let summary_line = Line::from(entry.summary.clone());
+                let wrapped = word_wrap_line(&summary_line, RtOptions::new(wrap_width));
+                let padded = prefix_lines(
+                    wrapped
+                        .into_iter()
+                        .map(|line| line_to_static(&line))
+                        .collect(),
+                    "    ".into(),
+                    "    ".into(),
+                );
+                lines.extend(padded);
+            }
+        }
+
+        lines.push(Line::from(
+            "Call memory_fetch(\"<id>\") before quoting a suggestion.".dim(),
+        ));
+
+        lines
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -89,6 +89,7 @@ use crate::history_cell;
 use crate::history_cell::AgentMessageCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::McpToolCallCell;
+use crate::history_cell::MemorySuggestionEntry;
 use crate::markdown::append_markdown;
 use crate::render::renderable::ColumnRenderable;
 use crate::render::renderable::Renderable;
@@ -1171,6 +1172,22 @@ impl ChatWidget {
         self.app_event_tx.send(AppEvent::OpenSearchManager);
     }
 
+    fn handle_memory_suggest_command(&mut self, args: Option<String>) {
+        if let Some(query) = args.and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }) {
+            self.app_event_tx
+                .send(AppEvent::MemorySuggestRequested { query });
+            return;
+        }
+        self.app_event_tx.send(AppEvent::MemorySuggestPrompt);
+    }
+
     pub(crate) fn attach_image(
         &mut self,
         path: PathBuf,
@@ -1237,6 +1254,9 @@ impl ChatWidget {
             }
             SlashCommand::SearchCode => {
                 self.handle_search_code_command(args);
+            }
+            SlashCommand::MemorySuggest => {
+                self.handle_memory_suggest_command(args);
             }
             SlashCommand::Byok => {
                 self.app_event_tx.send(AppEvent::OpenByokManager);
@@ -2062,6 +2082,18 @@ impl ChatWidget {
         hits: Vec<codex_agentic_core::index::query::QueryHit>,
     ) {
         let cell = history_cell::new_search_results(query, confidence, hits);
+        self.add_boxed_history(cell);
+        self.request_redraw();
+    }
+
+    pub(crate) fn add_memory_suggestions(
+        &mut self,
+        query: String,
+        min_confidence: f32,
+        entries: Vec<MemorySuggestionEntry>,
+    ) {
+        let confidence_percent = ((min_confidence * 100.0).round() as i32).clamp(0, 100) as u8;
+        let cell = history_cell::new_memory_suggestions(query, confidence_percent, entries);
         self.add_boxed_history(cell);
         self.request_redraw();
     }

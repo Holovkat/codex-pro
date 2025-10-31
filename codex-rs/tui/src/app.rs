@@ -15,6 +15,7 @@ use crate::diff_render::DiffSummary;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::file_search::FileSearchManager;
 use crate::history_cell::HistoryCell;
+use crate::history_cell::MemorySuggestionEntry;
 #[cfg(not(debug_assertions))]
 use crate::history_cell::UpdateAvailableHistoryCell;
 use crate::index_delta::SnapshotDiff;
@@ -55,6 +56,9 @@ use codex_core::config::OPENAI_DEFAULT_MODEL;
 use codex_core::config::persist_model_selection;
 use codex_core::config::set_hide_full_access_warning;
 use codex_core::config_types::ProviderKind;
+use codex_core::memory::MemoryPreviewModeExt;
+use codex_core::memory::MemoryRetriever;
+use codex_core::memory::MemoryRuntime;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::SessionSource;
 use codex_core::protocol::TokenUsage;
@@ -432,6 +436,7 @@ pub(crate) struct App {
     pub(crate) backtrack: crate::app_backtrack::BacktrackState,
     pub(crate) feedback: codex_feedback::CodexFeedback,
     pub(crate) pending_update_action: Option<UpdateAction>,
+    memory_runtime: Option<MemoryRuntime>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -522,6 +527,17 @@ impl App {
         #[cfg(not(debug_assertions))]
         let upgrade_version = crate::updates::get_upgrade_version(&config, &update_config);
 
+        let memory_runtime = match MemoryRuntime::load(config.codex_home.join("memory")).await {
+            Ok(runtime) => Some(runtime),
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    "memory runtime unavailable; disabling memory suggestions"
+                );
+                None
+            }
+        };
+
         let mut app = Self {
             server: conversation_manager,
             app_event_tx,
@@ -547,6 +563,7 @@ impl App {
             backtrack: BacktrackState::default(),
             feedback,
             pending_update_action: None,
+            memory_runtime,
         };
 
         app.refresh_index_status_line();
@@ -969,11 +986,17 @@ impl App {
             AppEvent::SearchCodePrompt => {
                 self.show_search_code_prompt();
             }
+            AppEvent::MemorySuggestPrompt => {
+                self.show_memory_suggest_prompt();
+            }
             AppEvent::SearchConfidencePrompt => {
                 self.show_search_confidence_prompt();
             }
             AppEvent::SearchCodeRequested { query } => {
                 self.run_search_code(query);
+            }
+            AppEvent::MemorySuggestRequested { query } => {
+                self.run_memory_suggest(query);
             }
             AppEvent::SearchConfidenceSubmitted { raw } => {
                 self.handle_search_confidence_submission(raw);
@@ -987,6 +1010,16 @@ impl App {
             }
             AppEvent::SearchCodeError { query, error } => {
                 self.handle_search_code_error(query, error);
+            }
+            AppEvent::MemorySuggestResult {
+                query,
+                min_confidence,
+                entries,
+            } => {
+                self.handle_memory_suggest_result(query, min_confidence, entries);
+            }
+            AppEvent::MemorySuggestError { query, error } => {
+                self.handle_memory_suggest_error(query, error);
             }
             AppEvent::FileSearchResult { query, matches } => {
                 self.chat_widget.apply_file_search_result(query, matches);
@@ -1241,6 +1274,27 @@ impl App {
             .push_bottom_view(move |pane| pane.show_view(Box::new(view)));
     }
 
+    fn show_memory_suggest_prompt(&mut self) {
+        let tx = self.app_event_tx.clone();
+        let on_submit: PromptSubmitted = Box::new(move |value: String| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return;
+            }
+            tx.send(AppEvent::MemorySuggestRequested {
+                query: trimmed.to_string(),
+            });
+        });
+        let view = CustomPromptView::new(
+            "Suggest stored memories".to_string(),
+            "Describe what you want to recall".to_string(),
+            Some("Call memory_fetch(\"<id>\") after reviewing suggestions.".to_string()),
+            on_submit,
+        );
+        self.chat_widget
+            .push_bottom_view(move |pane| pane.show_view(Box::new(view)));
+    }
+
     fn show_search_confidence_prompt(&mut self) {
         let confidence_percent = self.settings.search_confidence_min_percent();
         let default_percent = (DEFAULT_SEARCH_CONFIDENCE_MIN * 100.0).round() as u8;
@@ -1367,6 +1421,66 @@ impl App {
         });
     }
 
+    fn run_memory_suggest(&mut self, query: String) {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            self.chat_widget
+                .add_error_message("Memory query cannot be empty.".to_string());
+            return;
+        }
+        let Some(runtime) = self.memory_runtime.clone() else {
+            self.chat_widget
+                .add_error_message("Memory runtime is unavailable in this session.".to_string());
+            return;
+        };
+        let tx = self.app_event_tx.clone();
+        let query = trimmed.to_string();
+        tokio::spawn(async move {
+            let retriever = MemoryRetriever::new(runtime);
+            let result = retriever.retrieve_for_text(&query, Some(10)).await;
+            match result {
+                Ok(retrieval) => {
+                    if retrieval.settings.preview_mode.requires_user_confirmation() {
+                        tx.send(AppEvent::MemorySuggestError {
+                            query,
+                            error: "Memory preview mode requires manual confirmation. Open the memory manager to approve suggestions."
+                                .to_string(),
+                        });
+                        return;
+                    }
+                    let min_confidence = retrieval.settings.min_confidence;
+                    let entries = retrieval
+                        .candidates
+                        .into_iter()
+                        .take(10)
+                        .map(|hit| {
+                            let confidence_percent =
+                                ((hit.record.confidence * 100.0).round() as i32).clamp(0, 100)
+                                    as u8;
+                            MemorySuggestionEntry {
+                                record_id: hit.record.record_id.to_string(),
+                                summary: hit.record.summary.trim().to_string(),
+                                confidence_percent,
+                                score: hit.score,
+                            }
+                        })
+                        .collect();
+                    tx.send(AppEvent::MemorySuggestResult {
+                        query,
+                        min_confidence,
+                        entries,
+                    });
+                }
+                Err(err) => {
+                    tx.send(AppEvent::MemorySuggestError {
+                        query,
+                        error: err.to_string(),
+                    });
+                }
+            }
+        });
+    }
+
     fn handle_search_code_result(&mut self, query: String, confidence: f32, hits: Vec<QueryHit>) {
         self.chat_widget.add_search_results(query, confidence, hits);
     }
@@ -1380,6 +1494,21 @@ impl App {
         } else {
             format!("Search for \"{query}\" failed: {error}")
         };
+        self.chat_widget.add_error_message(message);
+    }
+
+    fn handle_memory_suggest_result(
+        &mut self,
+        query: String,
+        min_confidence: f32,
+        entries: Vec<MemorySuggestionEntry>,
+    ) {
+        self.chat_widget
+            .add_memory_suggestions(query, min_confidence, entries);
+    }
+
+    fn handle_memory_suggest_error(&mut self, query: String, error: String) {
+        let message = format!("Memory suggestion for \"{query}\" failed: {error}");
         self.chat_widget.add_error_message(message);
     }
 
@@ -2629,6 +2758,7 @@ mod tests {
             backtrack: BacktrackState::default(),
             feedback: codex_feedback::CodexFeedback::new(),
             pending_update_action: None,
+            memory_runtime: None,
         }
     }
 
