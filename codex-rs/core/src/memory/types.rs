@@ -130,6 +130,8 @@ pub struct MemorySettings {
     pub preview_mode: MemoryPreviewMode,
     pub max_tokens: u32,
     pub retention_days: u32,
+    #[serde(default = "default_prefer_pull_suggestions")]
+    pub prefer_pull_suggestions: bool,
 }
 
 impl Default for MemorySettings {
@@ -140,8 +142,13 @@ impl Default for MemorySettings {
             preview_mode: MemoryPreviewMode::Enabled,
             max_tokens: 400,
             retention_days: 30,
+            prefer_pull_suggestions: default_prefer_pull_suggestions(),
         }
     }
+}
+
+const fn default_prefer_pull_suggestions() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

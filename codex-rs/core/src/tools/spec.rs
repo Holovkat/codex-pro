@@ -542,7 +542,40 @@ fn create_memory_fetch_tool() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: "memory_fetch".to_string(),
-        description: "Retrieve stored memory summaries by ID. Use the IDs provided in the prompt glossary and call this tool when more detail is required."
+        description: "Retrieve stored memory summaries by ID. Use the IDs provided by the memory_suggest tool (or the memory manager) and call this tool when more detail is required."
+            .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: None,
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_memory_suggest_tool() -> ToolSpec {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "query".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Text to search for in stored memories. If omitted, the assistant should supply the latest user message."
+                    .to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "top_k".to_string(),
+        JsonSchema::Number {
+            description: Some(
+                "Maximum number of memories to suggest (default 5, max 10).".to_string(),
+            ),
+        },
+    );
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "memory_suggest".to_string(),
+        description: "Retrieve a shortlist of stored memories relevant to the latest question. Call memory_fetch with an ID from the list before quoting its contents."
             .to_string(),
         strict: false,
         parameters: JsonSchema::Object {
@@ -910,6 +943,7 @@ pub(crate) fn build_specs(
     use crate::tools::handlers::McpHandler;
     use crate::tools::handlers::McpResourceHandler;
     use crate::tools::handlers::MemoryFetchHandler;
+    use crate::tools::handlers::MemorySuggestHandler;
     use crate::tools::handlers::PlanHandler;
     use crate::tools::handlers::ReadFileHandler;
     use crate::tools::handlers::ShellHandler;
@@ -928,6 +962,7 @@ pub(crate) fn build_specs(
     let mcp_handler = Arc::new(McpHandler);
     let mcp_resource_handler = Arc::new(McpResourceHandler);
     let memory_fetch_handler = Arc::new(MemoryFetchHandler);
+    let memory_suggest_handler = Arc::new(MemorySuggestHandler);
 
     let use_unified_exec = config.experimental_unified_exec_tool
         || matches!(config.shell_type, ConfigShellToolType::Streamable);
@@ -965,7 +1000,9 @@ pub(crate) fn build_specs(
     builder.push_spec(PLAN_TOOL.clone());
     builder.register_handler("update_plan", plan_handler);
 
+    builder.push_spec_with_parallel_support(create_memory_suggest_tool(), true);
     builder.push_spec_with_parallel_support(create_memory_fetch_tool(), true);
+    builder.register_handler("memory_suggest", memory_suggest_handler);
     builder.register_handler("memory_fetch", memory_fetch_handler);
 
     if let Some(apply_patch_tool_type) = &config.apply_patch_tool_type {

@@ -388,7 +388,7 @@ fn build_search_hint(root: &Path, confidence_percent: u8) -> Option<String> {
         return None;
     }
     Some(format!(
-        "Use `/search-code \"<keywords>\"` to run semantic code search whenever you need to reference project code. It matches by meaning (not regex) and hides hits below {confidence_percent}% confidence."
+        "Use `/search-code \"<keywords>\"` to run semantic code search whenever you need to reference project code. It matches by meaning (not regex) and hides hits below {confidence_percent}% confidence.\n\nWhen you need stored context, call `memory_suggest` (optionally with a \"query\" argument). Then call `memory_fetch` with the IDs you plan to quote before incorporating memory content into your response."
     ))
 }
 

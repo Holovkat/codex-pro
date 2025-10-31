@@ -1013,6 +1013,9 @@ impl Session {
         let Some(runtime) = &self.memory_runtime else {
             return;
         };
+        if runtime.settings.get().await.prefer_pull_suggestions {
+            return;
+        }
         let Some(query_text) = latest_user_message_text(turn_input) else {
             return;
         };
@@ -1987,7 +1990,7 @@ fn parse_review_output_event(text: &str) -> ReviewOutputEvent {
     }
 }
 
-fn latest_user_message_text(items: &[ResponseItem]) -> Option<String> {
+pub(crate) fn latest_user_message_text(items: &[ResponseItem]) -> Option<String> {
     items.iter().rev().find_map(|item| match item {
         ResponseItem::Message { role, content, .. } if role == "user" => {
             let combined = content
