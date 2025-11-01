@@ -81,6 +81,12 @@ impl ToolHandler for SearchCodeHandler {
                     lines.push(format!("    {snippet_line}"));
                 }
             }
+            lines.push(format!(
+                "    → read more with read_file(path: \"{path}\", start: {start}, end: {end})",
+                path = hit.file_path,
+                start = hit.start_line,
+                end = hit.end_line
+            ));
         }
         Ok(ToolOutput::Function {
             content: lines.join("\n"),
