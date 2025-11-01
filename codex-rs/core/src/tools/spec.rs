@@ -586,6 +586,43 @@ fn create_memory_suggest_tool() -> ToolSpec {
     })
 }
 
+fn create_search_code_tool() -> ToolSpec {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "query".to_string(),
+        JsonSchema::String {
+            description: Some("Query text to search for in the indexed workspace.".to_string()),
+        },
+    );
+    properties.insert(
+        "top_k".to_string(),
+        JsonSchema::Number {
+            description: Some(
+                "Maximum number of results to return (default 5, max 20).".to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "model".to_string(),
+        JsonSchema::String {
+            description: Some("Optional embedding model override (advanced).".to_string()),
+        },
+    );
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "search_code".to_string(),
+        description:
+            "Run semantic code search against the indexed workspace and return matching file spans."
+                .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["query".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
 fn create_list_dir_tool() -> ToolSpec {
     let mut properties = BTreeMap::new();
     properties.insert(
@@ -946,6 +983,7 @@ pub(crate) fn build_specs(
     use crate::tools::handlers::MemorySuggestHandler;
     use crate::tools::handlers::PlanHandler;
     use crate::tools::handlers::ReadFileHandler;
+    use crate::tools::handlers::SearchCodeHandler;
     use crate::tools::handlers::ShellHandler;
     use crate::tools::handlers::TestSyncHandler;
     use crate::tools::handlers::UnifiedExecHandler;
@@ -963,6 +1001,7 @@ pub(crate) fn build_specs(
     let mcp_resource_handler = Arc::new(McpResourceHandler);
     let memory_fetch_handler = Arc::new(MemoryFetchHandler);
     let memory_suggest_handler = Arc::new(MemorySuggestHandler);
+    let search_code_handler = Arc::new(SearchCodeHandler);
 
     let use_unified_exec = config.experimental_unified_exec_tool
         || matches!(config.shell_type, ConfigShellToolType::Streamable);
@@ -1001,7 +1040,9 @@ pub(crate) fn build_specs(
     builder.register_handler("update_plan", plan_handler);
 
     builder.push_spec_with_parallel_support(create_memory_suggest_tool(), true);
+    builder.push_spec_with_parallel_support(create_search_code_tool(), true);
     builder.push_spec_with_parallel_support(create_memory_fetch_tool(), true);
+    builder.register_handler("search_code", search_code_handler);
     builder.register_handler("memory_suggest", memory_suggest_handler);
     builder.register_handler("memory_fetch", memory_fetch_handler);
 

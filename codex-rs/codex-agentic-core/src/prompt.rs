@@ -388,7 +388,7 @@ fn build_search_hint(root: &Path, confidence_percent: u8) -> Option<String> {
         return None;
     }
     Some(format!(
-        "Use `/search-code \"<keywords>\"` to run semantic code search whenever you need to reference project code. It matches by meaning (not regex) and hides hits below {confidence_percent}% confidence.\n\nWhen you need stored context, call `memory_suggest` (optionally with a \"query\" argument). Then call `memory_fetch` with the IDs you plan to quote before incorporating memory content into your response."
+        "Call the `search_code` tool (or `/search-code \"<keywords>\"`) whenever you need to reference project code. It matches by meaning (not regex) and hides hits below {confidence_percent}% confidence.\n\nWhen you need stored context, call `memory_suggest` (optionally with a \"query\" argument). Then call `memory_fetch` with the IDs you plan to quote before incorporating memory content into your response."
     ))
 }
 
@@ -514,7 +514,7 @@ mod tests {
         let hints = PromptHints::for_overlay(&sources, 72);
         let merged = hints.merge("Existing overlay instructions").into_owned();
         assert!(merged.contains("Existing overlay instructions"));
-        assert!(merged.contains("Use `/search-code \"<keywords>\"`"));
+        assert!(merged.contains("search_code"));
         assert!(merged.contains("72% confidence"));
         let no_duplicate = hints.merge(&merged);
         assert_eq!(no_duplicate.as_ref(), merged);
