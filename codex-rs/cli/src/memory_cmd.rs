@@ -22,6 +22,8 @@ use codex_core::memory::MemoryRuntime;
 use codex_core::memory::MemorySettingsManager;
 use codex_core::memory::MemorySource;
 use codex_core::memory::MemoryStats;
+use codex_core::memory::MemoryRetriever;
+use codex_core::memory::MemoryPreviewModeExt;
 use codex_core::memory::MiniCpmArtifactStatus;
 use codex_core::memory::MiniCpmDownloadState;
 use codex_core::memory::MiniCpmManager;
@@ -60,6 +62,8 @@ enum MemoryAction {
     Delete(DeleteArgs),
     /// Search the memory store semantically.
     Search(SearchArgs),
+    /// Suggest the highest-confidence memories for a query without fetching full shards.
+    Suggest(SuggestArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -151,6 +155,18 @@ struct SearchArgs {
     json: bool,
 }
 
+#[derive(Debug, Parser)]
+struct SuggestArgs {
+    /// Query text to suggest related memories for.
+    query: String,
+    /// Maximum number of suggestions (default 5).
+    #[arg(long)]
+    limit: Option<usize>,
+    /// Output results as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum, Serialize, Default)]
 enum MemorySourceArg {
     #[default]
@@ -203,6 +219,7 @@ pub async fn run(memory_cli: MemoryCli, root_overrides: CliConfigOverrides) -> a
         MemoryAction::Edit(args) => edit(memory_root.clone(), args).await?,
         MemoryAction::Delete(args) => delete(memory_root.clone(), args).await?,
         MemoryAction::Search(args) => search(memory_root.clone(), args).await?,
+        MemoryAction::Suggest(args) => suggest(memory_root.clone(), args).await?,
     }
 
     Ok(())
@@ -404,6 +421,48 @@ async fn search(memory_root: PathBuf, args: SearchArgs) -> anyhow::Result<()> {
     } else {
         print_hits_table(&hits, threshold);
     }
+    Ok(())
+}
+
+async fn suggest(memory_root: PathBuf, args: SuggestArgs) -> anyhow::Result<()> {
+    let runtime = load_runtime(memory_root).await?;
+    let retriever = MemoryRetriever::new(runtime.clone());
+    let limit = args.limit.unwrap_or(5).clamp(1, 50);
+    let retrieval = retriever
+        .retrieve_for_text(&args.query, Some(limit))
+        .await
+        .context("memory suggestion failed")?;
+
+    if retrieval
+        .settings
+        .preview_mode
+        .requires_user_confirmation()
+    {
+        println!(
+            "Memory preview mode requires manual confirmation. Open the memory manager to accept suggestions."
+        );
+        return Ok(());
+    }
+
+    if retrieval.candidates.is_empty() {
+        println!(
+            "No memories above {:.0}% confidence matched \"{}\".",
+            retrieval.settings.min_confidence * 100.0,
+            args.query
+        );
+        return Ok(());
+    }
+
+    if args.json {
+        print_hits_json(&retrieval.candidates)?;
+    } else {
+        print_hits_table(&retrieval.candidates, retrieval.settings.min_confidence);
+        println!();
+        println!(
+            "Fetch a full shard with: memory fetch --id <memory-id>"
+        );
+    }
+
     Ok(())
 }
 
