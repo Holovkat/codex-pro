@@ -94,6 +94,7 @@ impl MemoryRetriever {
             .filter(|hit| hit.record.confidence >= settings.min_confidence)
             .collect();
         filtered.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
+        store.record_suggest_invocation()?;
         if filtered.is_empty() {
             store.record_miss()?;
         } else {

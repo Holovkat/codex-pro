@@ -16,6 +16,7 @@ codex-core = { workspace = true }
 codex-ollama = { workspace = true }
 codex-protocol = { workspace = true }
 codex-common = { workspace = true }
+codex-otel = { workspace = true }
 fastembed = { workspace = true }
 fslock = { workspace = true }
 futures = { workspace = true, default-features = false }

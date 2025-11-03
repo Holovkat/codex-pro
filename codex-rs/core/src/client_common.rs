@@ -262,7 +262,8 @@ impl From<VerbosityConfig> for OpenAiVerbosity {
 #[derive(Debug, Serialize)]
 pub(crate) struct ResponsesApiRequest<'a> {
     pub(crate) model: &'a str,
-    pub(crate) instructions: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) instructions: Option<&'a str>,
     // TODO(mbolin): ResponseItem::Other should not be serialized. Currently,
     // we code defensively to avoid this case, but perhaps we should use a
     // separate enum for serialization.
@@ -454,7 +455,7 @@ mod tests {
         let tools: Vec<serde_json::Value> = vec![];
         let req = ResponsesApiRequest {
             model: "gpt-5",
-            instructions: "i",
+            instructions: Some("i"),
             input: &input,
             tools: &tools,
             tool_choice: "auto",
@@ -495,7 +496,7 @@ mod tests {
 
         let req = ResponsesApiRequest {
             model: "gpt-5",
-            instructions: "i",
+            instructions: Some("i"),
             input: &input,
             tools: &tools,
             tool_choice: "auto",
@@ -531,7 +532,7 @@ mod tests {
         let tools: Vec<serde_json::Value> = vec![];
         let req = ResponsesApiRequest {
             model: "gpt-5",
-            instructions: "i",
+            instructions: Some("i"),
             input: &input,
             tools: &tools,
             tool_choice: "auto",

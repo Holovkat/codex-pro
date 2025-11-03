@@ -164,6 +164,8 @@ pub struct MemoryStats {
     pub misses: u64,
     pub preview_accepted: u64,
     pub preview_skipped: u64,
+    #[serde(default)]
+    pub suggest_invocations: u64,
     pub disk_usage_bytes: u64,
     pub last_rebuild_at: Option<DateTime<Utc>>,
 }
@@ -174,6 +176,8 @@ pub struct MemoryMetrics {
     pub misses: u64,
     pub preview_accepted: u64,
     pub preview_skipped: u64,
+    #[serde(default)]
+    pub suggest_invocations: u64,
     pub last_reset_at: Option<DateTime<Utc>>,
 }
 

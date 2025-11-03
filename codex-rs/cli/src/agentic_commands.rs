@@ -33,7 +33,7 @@ fn register_cli_overrides(registry: &mut CommandRegistry) {
     registry.register_with_descriptor(
         "search-code",
         Some(
-            "Run semantic code search and filter results below the confidence threshold"
+            "Run semantic code search (uses the search_code tool under the hood) and filter results below the confidence threshold"
                 .to_string(),
         ),
         search_command,
@@ -52,7 +52,8 @@ fn render_help_recipes() -> String {
         "1) codex-agentic --model gpt-4o-mini --reasoning-effort medium",
         "2) codex-agentic --oss --model qwq:latest",
         "3) codex-agentic resume --last --full-auto --search",
-        "4) codex-agentic apply",
+        "4) codex-agentic search-code \"hotfix patch builder\"",
+        "5) codex memory suggest --query \"summarize recent regressions\"",
     ]
     .join("\n")
 }

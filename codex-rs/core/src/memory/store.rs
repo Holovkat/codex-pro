@@ -267,6 +267,7 @@ impl GlobalMemoryStore {
             misses: self.metrics.misses,
             preview_accepted: self.metrics.preview_accepted,
             preview_skipped: self.metrics.preview_skipped,
+            suggest_invocations: self.metrics.suggest_invocations,
             disk_usage_bytes,
             last_rebuild_at: self.last_rebuild_at,
         })
@@ -309,6 +310,12 @@ impl GlobalMemoryStore {
     pub fn record_preview_skip(&mut self) -> Result<()> {
         let _lock = self.acquire_lock()?;
         self.metrics.preview_skipped = self.metrics.preview_skipped.saturating_add(1);
+        self.persist_metrics_unlocked()
+    }
+
+    pub fn record_suggest_invocation(&mut self) -> Result<()> {
+        let _lock = self.acquire_lock()?;
+        self.metrics.suggest_invocations = self.metrics.suggest_invocations.saturating_add(1);
         self.persist_metrics_unlocked()
     }
 
@@ -792,14 +799,14 @@ mod tests {
     #[test]
     fn prune_records_keeps_newest_entries() {
         let mut older = sample_record("Hello again");
-        older.created_at = older.created_at - Duration::minutes(10);
+        older.created_at -= Duration::minutes(10);
         older.updated_at = older.created_at;
 
         let mut newest = sample_record("Hello again");
         newest.created_at = older.created_at + Duration::minutes(5);
         newest.updated_at = newest.created_at + Duration::seconds(30);
 
-        let mut records = vec![older.clone(), newest.clone()];
+        let mut records = vec![older, newest.clone()];
         let removed = prune_records(&mut records);
 
         assert_eq!(removed, 1);
@@ -819,7 +826,7 @@ mod tests {
         second.created_at = baseline - Duration::minutes(1);
         second.updated_at = baseline;
 
-        let mut records = vec![first.clone(), second.clone()];
+        let mut records = vec![first, second.clone()];
         let removed = prune_records(&mut records);
 
         assert_eq!(removed, 1);
@@ -833,7 +840,7 @@ mod tests {
         identical_b.created_at = identical_a.created_at;
         identical_b.updated_at = identical_a.updated_at;
 
-        let mut identical_records = vec![identical_a.clone(), identical_b.clone()];
+        let mut identical_records = vec![identical_a, identical_b.clone()];
         let identical_removed = prune_records(&mut identical_records);
 
         assert_eq!(identical_removed, 1);
@@ -848,7 +855,7 @@ mod tests {
         let manifest_path = root.join(MANIFEST_FILENAME);
 
         let mut older = sample_record("Repeated hello");
-        older.created_at = older.created_at - Duration::minutes(30);
+        older.created_at -= Duration::minutes(30);
         older.updated_at = older.created_at;
 
         let mut newer = sample_record("Repeated hello");

@@ -82,6 +82,13 @@ impl Settings {
         let index = self.index.get_or_insert_with(Index::default);
         index.search_confidence_min = normalized;
     }
+
+    pub fn auto_build_index(&self) -> bool {
+        self.index
+            .as_ref()
+            .and_then(|idx| idx.auto_build_on_start)
+            .unwrap_or(true)
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
@@ -101,6 +108,7 @@ pub struct Index {
     pub retrieval_threshold: Option<f32>,
     pub context_tokens: Option<u32>,
     pub search_confidence_min: Option<f32>,
+    pub auto_build_on_start: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
@@ -659,5 +667,20 @@ mod tests {
         assert_eq!(custom.wire_api, WireApi::Chat);
         assert!(custom.reasoning_controls.postprocess_reasoning);
         assert!(!custom.reasoning_controls.think_enabled);
+    }
+
+    #[test]
+    fn auto_build_index_defaults_to_true_and_respects_override() {
+        let settings = Settings::default();
+        assert!(settings.auto_build_index());
+
+        let settings = Settings {
+            index: Some(Index {
+                auto_build_on_start: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(!settings.auto_build_index());
     }
 }

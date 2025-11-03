@@ -71,6 +71,10 @@ const ACP_SLASH_COMMANDS: &[(&str, &str)] = &[
         "search-code",
         "Search indexed code using the semantic index",
     ),
+    (
+        "memory-suggest",
+        "Show high-confidence memories for the latest question",
+    ),
     ("model", "Choose what model and reasoning effort to use"),
     ("models", "List configured models for the active provider"),
     ("byok", "Manage custom model providers"),

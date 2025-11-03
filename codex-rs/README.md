@@ -88,6 +88,16 @@ codex completion zsh
 codex completion fish
 ```
 
+### Memory utilities
+
+- `/memory-suggest` surfaces the best-matching memories in the TUI without flooding the prompt. Follow up with `memory_fetch("<id>")` when you need the full shard.
+- The CLI mirrors this flow: `codex memory suggest --query "feature flag rollout" [--limit N] [--json]`.
+
+### Semantic code search
+
+- The agent now calls the `search_code` tool to query the workspace index. Results include ready-to-run `read_file(path, start, end)` hints for deeper inspection.
+- You can still drive it manually: `codex-agentic search-code "load_config error handling" --top 20`.
+
 ## Build, Test, and Development Commands
 - `just fmt` – run rustfmt across touched crates (required after Rust edits).
 - `just fix -p codex-<crate>` – apply scoped Clippy fixes; only run plain `just fix` when shared crates change.

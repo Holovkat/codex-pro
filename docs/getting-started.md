@@ -68,6 +68,34 @@ You can give Codex extra instructions and guidance using `AGENTS.md` files. Code
 
 For more information on how to use AGENTS.md, see the [official AGENTS.md documentation](https://agents.md/).
 
+> [!NOTE]
+> Codex enforces a 48 KiB limit on the combined system instructions it sends to the model (built-in guidance plus every `AGENTS.md` overlay). If you hit a fatal “instructions exceed budget” error, trim or split large instruction files; see [responses_instruction_budget_guard](./config.md#responses_instruction_budget_guard) for mitigation tips.
+
+#### Pulling memories on demand
+
+- In the chat UI, run `/memory-suggest` to see the highest-confidence memories for your latest question. Follow up with `memory_fetch("<id>")` to expand a specific shard when needed.
+- From the CLI you can do the same with:
+
+  ```bash
+  codex memory suggest --query "summarize the onboarding flow"
+  ```
+
+  Add `--limit N` to adjust how many items are returned or `--json` for machine-readable output.
+- Suggestions respect your preview settings; if confirmation is required, approve them in the memory manager and retry.
+
+#### Searching indexed code
+
+- Codex exposes a `search_code` tool to look up code semantically. In the UI you can still type `/search-code "keywords"`, but the agent now prefers the tool call automatically.
+- From the CLI:
+
+  ```bash
+  codex-agentic search-code "load_config error handling"
+  ```
+
+  Use `--top` to tweak result count and `--min-confidence` to control the cutoff. Each hit includes a ready-to-run `read_file(path, start, end)` hint for deeper inspection.
+- The per-workspace index lives under `.codex/index/` relative to the project root. If you work with multiple git worktrees, create a symlink back to a shared index (for example `ln -s ../main/.codex/index .codex/index`) so each worktree can reuse the same cache.
+- When no manifest is present, Codex auto-builds the index on launch unless you set `index.auto_build_on_start = false` in your settings.
+
 ### Tips & shortcuts
 
 #### Use `@` for file search

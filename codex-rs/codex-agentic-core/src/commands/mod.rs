@@ -150,7 +150,8 @@ pub fn register_defaults(registry: &mut CommandRegistry) {
                     "  1. {bin} --model gpt-4o-mini --reasoning-effort medium\n",
                     "  2. {bin} --oss --model qwq:latest\n",
                     "  3. {bin} resume --last --full-auto --search\n",
-                    "  4. {bin} apply\n"
+                    "  4. {bin} search-code \"hotfix patch builder\"\n",
+                    "  5. {bin} memory suggest --query \"summarize recent regressions\"\n"
                 ),
                 bin = bin
             );

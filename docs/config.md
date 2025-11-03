@@ -804,6 +804,10 @@ Currently, `"vscode"` is the default, though Codex does not verify VS Code is in
 
 Maximum number of bytes to read from an `AGENTS.md` file to include in the instructions sent with the first turn of a session. Defaults to 32 KiB.
 
+### responses_instruction_budget_guard
+
+Codex caps the combined system instructions it sends to the Responses API (built-in guidance plus any `AGENTS.md`, overlays, or `experimental_instructions_file` content) at **48 KiB**. If the assembled prompt exceeds that budget the request is aborted with a fatal error that reports the size. Trim custom instructions—shorten or split large `AGENTS.md` files, remove redundant overlays, or move lengthy reference material into tools or memory instead of the system prompt—to stay under the limit.
+
 ### project_doc_fallback_filenames
 
 Ordered list of additional filenames to look for when `AGENTS.md` is missing at a given directory level. The CLI always checks `AGENTS.md` first; the configured fallbacks are tried in the order provided. This lets monorepos that already use alternate instruction files (for example, `CLAUDE.md`) work out of the box while you migrate to `AGENTS.md` over time.
@@ -835,6 +839,27 @@ notifications = [ "agent-turn-complete", "approval-requested" ]
 > Codex emits desktop notifications using terminal escape codes. Not all terminals support these (notably, macOS Terminal.app and VS Code's terminal do not support custom notifications. iTerm2, Ghostty and WezTerm do support these notifications).
 
 > [!NOTE] > `tui.notifications` is built‑in and limited to the TUI session. For programmatic or cross‑environment notifications—or to integrate with OS‑specific notifiers—use the top‑level `notify` option to run an external program that receives event JSON. The two settings are independent and can be used together.
+
+## Semantic index configuration
+
+Control when Codex builds and queries the semantic search cache via the `index` table.
+
+```toml
+[index]
+auto_build_on_start = false
+search_confidence_min = 0.8
+```
+
+- `auto_build_on_start` (default `true`): when enabled, Codex automatically triggers an index build the first time a workspace launches and `.codex/index/manifest.json` is missing. Set it to `false` if you manage the cache manually.
+- `search_confidence_min`: minimum confidence threshold for `search_code` results (overrides per-workspace settings).
+
+The index is stored in `.codex/index/` under the project root. When working across multiple git worktrees, point each worktree at a shared cache with a symlink:
+
+```bash
+ln -s ../main/.codex/index .codex/index
+```
+
+If the symlink targets an existing manifest, Codex detects the ready index and skips the automatic build, keeping the status footer up to date.
 
 ## Forcing a login method
 

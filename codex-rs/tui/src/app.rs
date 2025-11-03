@@ -566,6 +566,13 @@ impl App {
             memory_runtime,
         };
 
+        if app.settings.auto_build_index() && !app.index_manifest_exists() {
+            let mut options = BuildOptions::default();
+            options.project_root = app.config.cwd.clone();
+            app.show_index_toast("Semantic index missing — building now…".to_string());
+            app.index_worker.spawn_build(options);
+        }
+
         app.refresh_index_status_line();
 
         spawn_status_refresh(app.app_event_tx.clone());
@@ -611,6 +618,16 @@ impl App {
     }
 
     fn refresh_index_status_line(&mut self) {
+        if self.index_progress.is_none() && !self.index_manifest_exists() {
+            let message = if self.settings.auto_build_index() {
+                "Semantic index not found — building automatically…"
+            } else {
+                "Semantic index not found — run /index to build it."
+            };
+            self.chat_widget
+                .set_index_status_line(Some(message.to_string()));
+            return;
+        }
         if let Some(state) = &self.index_progress {
             let line = render_progress_status(state);
             self.chat_widget.set_index_status_line(Some(line));
@@ -630,6 +647,10 @@ impl App {
         }
         let line = self.index_status.as_ref().map(format_index_status);
         self.chat_widget.set_index_status_line(line);
+    }
+
+    fn index_manifest_exists(&self) -> bool {
+        self.config.cwd.join(".codex/index/manifest.json").exists()
     }
 
     fn apply_model_provider(&mut self, provider_id: &str) {

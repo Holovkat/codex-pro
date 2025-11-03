@@ -12,6 +12,7 @@ use codex_otel::otel_event_manager::OtelEventManager;
 use codex_protocol::ConversationId;
 use codex_protocol::config_types::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use eventsource_stream::Eventsource;
 use futures::prelude::*;
@@ -60,6 +61,18 @@ use crate::state::TaskKind;
 use crate::token_data::PlanType;
 use crate::tools::spec::create_tools_json_for_responses_api;
 use crate::util::backoff;
+
+const RESPONSES_INSTRUCTIONS_MAX_BYTES: usize = 48 * 1024;
+
+fn ensure_instruction_budget(bytes: usize) -> Result<()> {
+    if bytes > RESPONSES_INSTRUCTIONS_MAX_BYTES {
+        Err(CodexErr::Fatal(format!(
+            "Combined system instructions are {bytes} bytes, exceeding the {RESPONSES_INSTRUCTIONS_MAX_BYTES} byte limit enforced by the Responses API. Trim `core/prompt.md`, `core/gpt_5_codex_prompt.md`, or any configured base instructions before retrying."
+        )))
+    } else {
+        Ok(())
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct ErrorResponse {
@@ -207,7 +220,26 @@ impl ModelClient {
 
         let auth_manager = self.auth_manager.clone();
 
-        let full_instructions = prompt.get_full_instructions(&self.config.model_family);
+        let auth_mode = self.auth_manager.as_ref().and_then(|manager| {
+            manager
+                .auth_for_provider(
+                    &self.config.model_provider_id,
+                    self.provider.requires_openai_auth,
+                )
+                .map(|auth| auth.mode)
+        });
+
+        let full_instructions = prompt
+            .get_full_instructions(&self.config.model_family)
+            .into_owned();
+        let instructions_len = full_instructions.len();
+        trace!(instructions_len, "prepared responses instructions");
+        ensure_instruction_budget(instructions_len)?;
+        trace!(
+            provider_name = %self.provider.name,
+            provider_base = ?self.provider.base_url,
+            "building responses payload"
+        );
         let tools_json = create_tools_json_for_responses_api(&prompt.tools)?;
         let reasoning = create_reasoning_param_for_request(
             &self.config.model_family,
@@ -221,7 +253,21 @@ impl ModelClient {
             vec![]
         };
 
-        let input_with_instructions = prompt.get_formatted_input();
+        let mut input_with_instructions = prompt.get_formatted_input();
+        if !matches!(auth_mode, Some(AuthMode::ChatGPT)) && !full_instructions.trim().is_empty() {
+            input_with_instructions.insert(
+                0,
+                ResponseItem::Message {
+                    id: None,
+                    role: "system".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: full_instructions.clone(),
+                    }],
+                },
+            );
+        }
+
+        let instructions_field = Some(full_instructions.as_str());
 
         let verbosity = match &self.config.model_family.family {
             family if family == "gpt-5" => self.config.model_verbosity,
@@ -251,7 +297,7 @@ impl ModelClient {
 
         let payload = ResponsesApiRequest {
             model: &self.config.model,
-            instructions: &full_instructions,
+            instructions: instructions_field,
             input: &input_with_instructions,
             tools: &tools_json,
             tool_choice: "auto",
@@ -978,6 +1024,19 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio_test::io::Builder as IoBuilder;
     use tokio_util::io::ReaderStream;
+
+    #[test]
+    fn instruction_budget_allows_within_limit() {
+        ensure_instruction_budget(RESPONSES_INSTRUCTIONS_MAX_BYTES).unwrap();
+    }
+
+    #[test]
+    fn instruction_budget_rejects_over_limit() {
+        let err = ensure_instruction_budget(RESPONSES_INSTRUCTIONS_MAX_BYTES + 1)
+            .expect_err("expected error");
+        assert_matches!(err, CodexErr::Fatal(_));
+        assert!(err.to_string().contains("Combined system instructions are"));
+    }
 
     // ────────────────────────────
     // Helpers

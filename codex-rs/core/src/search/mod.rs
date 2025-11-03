@@ -87,7 +87,7 @@ fn build_embedder(manifest: &IndexManifest, override_model: Option<&str>) -> Res
         .and_then(parse_model)
         .or_else(|| parse_model(&manifest.embedding_model))
         .unwrap_or_default();
-    TextEmbedding::try_new(InitOptions::new(selected.clone()))
+    TextEmbedding::try_new(InitOptions::new(selected))
         .or_else(|_| TextEmbedding::try_new(Default::default()))
         .map_err(|err| anyhow!("failed to initialise embedding model: {err}"))
 }

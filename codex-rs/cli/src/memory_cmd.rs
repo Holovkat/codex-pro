@@ -3,6 +3,7 @@ use std::io::Write;
 use std::io::{self};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Context;
 use anyhow::anyhow;
@@ -16,20 +17,23 @@ use codex_core::config::ConfigOverrides;
 use codex_core::memory::GlobalMemoryStore;
 use codex_core::memory::MemoryHit;
 use codex_core::memory::MemoryMetadata;
+use codex_core::memory::MemoryPreviewModeExt;
 use codex_core::memory::MemoryRecord;
 use codex_core::memory::MemoryRecordUpdate;
+use codex_core::memory::MemoryRetriever;
 use codex_core::memory::MemoryRuntime;
 use codex_core::memory::MemorySettingsManager;
 use codex_core::memory::MemorySource;
 use codex_core::memory::MemoryStats;
-use codex_core::memory::MemoryRetriever;
-use codex_core::memory::MemoryPreviewModeExt;
 use codex_core::memory::MiniCpmArtifactStatus;
 use codex_core::memory::MiniCpmDownloadState;
 use codex_core::memory::MiniCpmManager;
 use codex_core::memory::MiniCpmStatus;
 use codex_core::memory::clean_summary;
+use codex_otel::otel_event_manager::OtelEventManager;
+use codex_protocol::ConversationId;
 use serde::Serialize;
+use serde_json::json;
 use uuid::Uuid;
 
 #[derive(Debug, Parser)]
@@ -219,7 +223,10 @@ pub async fn run(memory_cli: MemoryCli, root_overrides: CliConfigOverrides) -> a
         MemoryAction::Edit(args) => edit(memory_root.clone(), args).await?,
         MemoryAction::Delete(args) => delete(memory_root.clone(), args).await?,
         MemoryAction::Search(args) => search(memory_root.clone(), args).await?,
-        MemoryAction::Suggest(args) => suggest(memory_root.clone(), args).await?,
+        MemoryAction::Suggest(args) => {
+            let telemetry = build_cli_telemetry(&config);
+            suggest(memory_root.clone(), args, &telemetry).await?
+        }
     }
 
     Ok(())
@@ -424,22 +431,53 @@ async fn search(memory_root: PathBuf, args: SearchArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn suggest(memory_root: PathBuf, args: SuggestArgs) -> anyhow::Result<()> {
+async fn suggest(
+    memory_root: PathBuf,
+    args: SuggestArgs,
+    telemetry: &OtelEventManager,
+) -> anyhow::Result<()> {
     let runtime = load_runtime(memory_root).await?;
     let retriever = MemoryRetriever::new(runtime.clone());
     let limit = args.limit.unwrap_or(5).clamp(1, 50);
-    let retrieval = retriever
-        .retrieve_for_text(&args.query, Some(limit))
-        .await
-        .context("memory suggestion failed")?;
+    let call_id = format!("cli-memory-suggest-{}", Uuid::now_v7());
+    let args_json_base = json!({
+        "query": args.query,
+        "limit": limit,
+    })
+    .to_string();
+    let started = Instant::now();
+    let retrieval = match retriever.retrieve_for_text(&args.query, Some(limit)).await {
+        Ok(result) => result,
+        Err(err) => {
+            telemetry.tool_result(
+                "memory_suggest_cli",
+                &call_id,
+                &args_json_base,
+                started.elapsed(),
+                false,
+                &format!("{err:#}"),
+            );
+            return Err(err).context("memory suggestion failed");
+        }
+    };
+    let args_json = json!({
+        "query": args.query,
+        "limit": limit,
+        "min_confidence": retrieval.settings.min_confidence,
+    })
+    .to_string();
 
-    if retrieval
-        .settings
-        .preview_mode
-        .requires_user_confirmation()
-    {
+    if retrieval.settings.preview_mode.requires_user_confirmation() {
         println!(
             "Memory preview mode requires manual confirmation. Open the memory manager to accept suggestions."
+        );
+        telemetry.tool_result(
+            "memory_suggest_cli",
+            &call_id,
+            &args_json,
+            started.elapsed(),
+            false,
+            "preview mode requires confirmation",
         );
         return Ok(());
     }
@@ -450,6 +488,14 @@ async fn suggest(memory_root: PathBuf, args: SuggestArgs) -> anyhow::Result<()> 
             retrieval.settings.min_confidence * 100.0,
             args.query
         );
+        telemetry.tool_result(
+            "memory_suggest_cli",
+            &call_id,
+            &args_json,
+            started.elapsed(),
+            true,
+            "0 suggestions",
+        );
         return Ok(());
     }
 
@@ -458,10 +504,17 @@ async fn suggest(memory_root: PathBuf, args: SuggestArgs) -> anyhow::Result<()> 
     } else {
         print_hits_table(&retrieval.candidates, retrieval.settings.min_confidence);
         println!();
-        println!(
-            "Fetch a full shard with: memory fetch --id <memory-id>"
-        );
+        println!("Fetch a full shard with: memory fetch --id <memory-id>");
     }
+
+    telemetry.tool_result(
+        "memory_suggest_cli",
+        &call_id,
+        &args_json,
+        started.elapsed(),
+        true,
+        &format!("{} suggestions", retrieval.candidates.len()),
+    );
 
     Ok(())
 }
@@ -470,6 +523,7 @@ fn print_stats(stats: MemoryStats) {
     println!("Total records : {}", stats.total_records);
     println!("Hits          : {}", stats.hits);
     println!("Misses        : {}", stats.misses);
+    println!("Suggestions   : {}", stats.suggest_invocations);
     println!("Preview accept: {}", stats.preview_accepted);
     println!("Preview skip  : {}", stats.preview_skipped);
     let mb = stats.disk_usage_bytes as f64 / (1024.0 * 1024.0);
@@ -535,6 +589,18 @@ async fn print_model_status(manager: Arc<MiniCpmManager>) -> anyhow::Result<()> 
     }
 
     Ok(())
+}
+
+fn build_cli_telemetry(config: &Config) -> OtelEventManager {
+    OtelEventManager::new(
+        ConversationId::new(),
+        config.model.as_str(),
+        config.model_family.slug.as_str(),
+        None,
+        None,
+        config.otel.log_user_prompt,
+        "codex-cli".to_string(),
+    )
 }
 
 fn format_download_state(state: &MiniCpmDownloadState) -> Option<String> {

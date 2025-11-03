@@ -1,18 +1,23 @@
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use clap::Parser;
 use serde_json::json;
+use uuid::Uuid;
 
 use crate::commands::CommandContext;
 use crate::commands::CommandResult;
 use crate::settings::DEFAULT_SEARCH_CONFIDENCE_MIN;
 use crate::settings::Settings;
 use crate::settings::persist_search_confidence_min;
+use codex_core::config::OPENAI_DEFAULT_MODEL;
+use codex_otel::otel_event_manager::OtelEventManager;
+use codex_protocol::ConversationId;
 
 use super::analytics::load_analytics;
 use super::analytics::load_chunk_records;
@@ -28,6 +33,24 @@ use super::query::QueryResponse;
 use super::query::query_index;
 
 const DEFAULT_QUERY_TOP_K: usize = 8;
+
+fn build_cli_telemetry(settings: &Settings, binary_name: &str) -> OtelEventManager {
+    let model = settings
+        .model
+        .as_ref()
+        .and_then(|m| m.default.as_ref())
+        .cloned()
+        .unwrap_or_else(|| OPENAI_DEFAULT_MODEL.to_string());
+    OtelEventManager::new(
+        ConversationId::new(),
+        &model,
+        &model,
+        None,
+        None,
+        false,
+        format!("codex-cli:{binary_name}"),
+    )
+}
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "index.build", disable_help_flag = true)]
@@ -267,12 +290,42 @@ pub fn search_command(ctx: &CommandContext, args: &[String]) -> Result<CommandRe
     let cli = parse::<SearchCli>("search-code", args)?;
     let project_root = resolve_root(ctx, cli.dir);
     let query = cli.query.join(" ");
-    let mut response = query_index(&project_root, &query, cli.top.max(1), None)?;
+    let telemetry = build_cli_telemetry(&ctx.settings, &ctx.binary_name);
+    let call_id = format!("cli-search-code-{}", Uuid::now_v7());
+    let mut args_json = json!({
+        "query": query,
+        "top": cli.top,
+        "min_confidence_arg": cli.min_confidence,
+    });
+    let started = Instant::now();
+    let response = match query_index(&project_root, &query, cli.top.max(1), None) {
+        Ok(resp) => resp,
+        Err(err) => {
+            telemetry.tool_result(
+                "search_code_cli",
+                &call_id,
+                &args_json.to_string(),
+                started.elapsed(),
+                false,
+                &format!("{err:#}"),
+            );
+            return Err(err);
+        }
+    };
     let confidence = cli
         .min_confidence
         .and_then(normalize_confidence)
         .unwrap_or_else(|| ctx.settings.search_confidence_min());
-    response = response.with_confidence_min(confidence);
+    args_json["resolved_min_confidence"] = json!(confidence);
+    let response = response.with_confidence_min(confidence);
+    telemetry.tool_result(
+        "search_code_cli",
+        &call_id,
+        &args_json.to_string(),
+        started.elapsed(),
+        true,
+        &format!("{} hits", response.hits.len()),
+    );
     Ok(CommandResult::Json(json!(response)))
 }
 
