@@ -58,7 +58,7 @@ use crate::client_common::ResponseEvent;
 use crate::config::Config;
 use crate::config::types::McpServerTransportConfig;
 use crate::config::types::ShellEnvironmentPolicy;
-use crate::conversation_history::ConversationHistory;
+use crate::context_manager::ContextManager;
 use crate::environment_context::EnvironmentContext;
 use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
@@ -1047,7 +1047,7 @@ impl Session {
         turn_context: &TurnContext,
         rollout_items: &[RolloutItem],
     ) -> Vec<ResponseItem> {
-        let mut history = ConversationHistory::new();
+        let mut history = ContextManager::new();
         for item in rollout_items {
             match item {
                 RolloutItem::ResponseItem(response_item) => {
@@ -1315,7 +1315,7 @@ impl Session {
         }
     }
 
-    pub(crate) async fn clone_history(&self) -> ConversationHistory {
+    pub(crate) async fn clone_history(&self) -> ContextManager {
         let state = self.state.lock().await;
         state.clone_history()
     }
@@ -3251,7 +3251,7 @@ mod tests {
         turn_context: &TurnContext,
     ) -> (Vec<RolloutItem>, Vec<ResponseItem>) {
         let mut rollout_items = Vec::new();
-        let mut live_history = ConversationHistory::new();
+        let mut live_history = ContextManager::new();
 
         let initial_context = session.build_initial_context(turn_context);
         for item in &initial_context {
