@@ -126,3 +126,36 @@ async fn memory_cli_crud_flow() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn memory_cli_toggle_runtime() -> Result<()> {
+    let codex_home = TempDir::new()?;
+
+    codex_command(codex_home.path())?
+        .args(["memory", "init"])
+        .assert()
+        .success();
+
+    codex_command(codex_home.path())?
+        .args(["memory", "disable"])
+        .assert()
+        .success()
+        .stdout(contains("Memory runtime disabled"));
+
+    let settings_path = codex_home.path().join("memory").join("settings.json");
+    let raw = std::fs::read_to_string(&settings_path)?;
+    let settings: serde_json::Value = serde_json::from_str(&raw)?;
+    assert_eq!(settings["enabled"].as_bool(), Some(false));
+
+    codex_command(codex_home.path())?
+        .args(["memory", "enable"])
+        .assert()
+        .success()
+        .stdout(contains("Memory runtime enabled"));
+
+    let raw = std::fs::read_to_string(settings_path)?;
+    let settings: serde_json::Value = serde_json::from_str(&raw)?;
+    assert_eq!(settings["enabled"].as_bool(), Some(true));
+
+    Ok(())
+}

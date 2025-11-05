@@ -74,7 +74,22 @@ impl MemoryDistiller {
     pub async fn spawn(root: PathBuf) -> Result<(Self, MemoryRuntime)> {
         let store = Arc::new(Mutex::new(GlobalMemoryStore::open(root.clone()).await?));
         let settings = Arc::new(MemorySettingsManager::load(root.clone()).await?);
+        let current_settings = settings.get().await;
         let model = Arc::new(MiniCpmManager::load(root.clone()).await?);
+        if !current_settings.enabled {
+            let embedder = Arc::new(Mutex::new(
+                TextEmbedding::try_new(Default::default()).context("initialize fastembed model")?,
+            ));
+            return Ok((
+                MemoryDistiller::noop(),
+                MemoryRuntime {
+                    store,
+                    settings,
+                    model,
+                    embedder,
+                },
+            ));
+        }
 
         ensure_model_cache(&model).await;
 
@@ -235,8 +250,11 @@ impl MemoryRuntime {
     pub async fn load(root: PathBuf) -> Result<Self> {
         let store = Arc::new(Mutex::new(GlobalMemoryStore::open(root.clone()).await?));
         let settings = Arc::new(MemorySettingsManager::load(root.clone()).await?);
+        let current_settings = settings.get().await;
         let model = Arc::new(MiniCpmManager::load(root).await?);
-        ensure_model_cache(&model).await;
+        if current_settings.enabled {
+            ensure_model_cache(&model).await;
+        }
         let embedder = Arc::new(Mutex::new(
             TextEmbedding::try_new(Default::default()).context("initialize fastembed model")?,
         ));
@@ -336,6 +354,11 @@ impl MemoryRuntime {
     }
 
     async fn embed_text(&self, text: &str) -> Result<Vec<f32>> {
+        if !self.settings.get().await.enabled {
+            return Err(anyhow!(
+                "memory runtime is disabled; run `codex memory enable` to turn it back on"
+            ));
+        }
         let mut embedder = self.embedder.lock().await;
         let embeddings = embedder
             .embed(vec![text.to_string()], None)
@@ -373,5 +396,27 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let records = runtime.store.lock().await.load_all().expect("load");
         assert!(!records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn spawn_returns_noop_when_disabled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = MemorySettingsManager::load(dir.path().to_path_buf())
+            .await
+            .expect("load manager");
+        manager
+            .update(|settings| settings.enabled = false)
+            .await
+            .expect("disable runtime");
+
+        let (distiller, runtime) = MemoryDistiller::spawn(dir.path().to_path_buf())
+            .await
+            .expect("spawn");
+        assert!(distiller.store().is_none());
+        let error = runtime
+            .search_records("ping", 5, None)
+            .await
+            .expect_err("search should fail when disabled");
+        assert!(error.to_string().contains("memory runtime is disabled"));
     }
 }

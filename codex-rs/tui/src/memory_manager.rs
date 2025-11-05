@@ -605,6 +605,7 @@ struct MemoryManagerState {
     query: String,
     editing_query: bool,
     semantic_hits: Option<Vec<(Uuid, f32)>>,
+    enabled: bool,
     min_confidence: f32,
     preview_mode: MemoryPreviewMode,
     manual_selected: HashSet<Uuid>,
@@ -644,6 +645,7 @@ impl MemoryManagerState {
             query: String::new(),
             editing_query: false,
             semantic_hits: None,
+            enabled: settings.enabled,
             min_confidence: settings.min_confidence,
             preview_mode: settings.preview_mode,
             manual_selected: HashSet::new(),
@@ -657,6 +659,11 @@ impl MemoryManagerState {
             modal: None,
             requester: None,
         };
+        if !state.enabled {
+            state.status = Some(StatusLine::error(
+                "Memory runtime disabled; enable it to resume ingestion",
+            ));
+        }
         state.refresh_model_state().await?;
         state.update_filtered();
         Ok(state)
@@ -683,6 +690,13 @@ impl MemoryManagerState {
             .stats()
             .map_err(|err| eyre!("failed to read memory stats: {err:#}"))?;
         drop(guard);
+        let settings = self.runtime.settings.get().await;
+        self.enabled = settings.enabled;
+        self.min_confidence = settings.min_confidence;
+        self.preview_mode = settings.preview_mode;
+        if !self.enabled {
+            self.semantic_hits = None;
+        }
         self.refresh_model_state().await?;
         self.update_filtered();
         Ok(())
@@ -771,6 +785,12 @@ impl MemoryManagerState {
     }
 
     async fn refresh_model_state(&mut self) -> Result<()> {
+        if !self.enabled {
+            self.model_status = None;
+            self.download_state = MiniCpmDownloadState::default();
+            self.diagnostics = MiniCpmDiagnostics::default();
+            return Ok(());
+        }
         if let Some(manager) = self.runtime.model_manager() {
             match manager.status().await {
                 Ok(status) => {
@@ -837,6 +857,12 @@ impl MemoryManagerState {
     }
 
     fn model_status_line(&self) -> Line<'static> {
+        if !self.enabled {
+            return Line::from(vec![
+                Span::from("MiniCPM: ").dim(),
+                "runtime disabled".red(),
+            ]);
+        }
         let mut spans: Vec<Span<'static>> = vec![Span::from("MiniCPM: ").dim()];
         match &self.model_status {
             Some(MiniCpmStatus::Ready {
@@ -896,6 +922,11 @@ impl MemoryManagerState {
             self.semantic_hits = None;
             self.update_filtered();
             return Ok(());
+        }
+        if !self.enabled {
+            return Err(eyre!(
+                "memory runtime disabled; enable it to run semantic search"
+            ));
         }
         let hits = self
             .runtime
@@ -993,6 +1024,50 @@ impl MemoryManagerState {
                     self.status = Some(StatusLine::error(err.to_string()));
                 }
             }
+            KeyCode::Char('e') if key.modifiers.is_empty() => {
+                let target = !self.enabled;
+                match self
+                    .runtime
+                    .settings
+                    .update(|settings| settings.enabled = target)
+                    .await
+                {
+                    Ok(_) => {
+                        self.enabled = target;
+                        if target {
+                            if let Err(err) = self.refresh_model_state().await {
+                                self.status = Some(StatusLine::error(format!(
+                                    "Failed to refresh runtime: {err:#}"
+                                )));
+                            } else if !self.query.trim().is_empty()
+                                && let Err(err) = self.run_semantic_search().await
+                            {
+                                self.status = Some(StatusLine::error(err.to_string()));
+                            }
+                            self.update_filtered();
+                            if self.status.is_none() {
+                                self.status = Some(StatusLine::success("Memory runtime enabled"));
+                            }
+                        } else {
+                            if let Err(err) = self.refresh_model_state().await {
+                                self.status = Some(StatusLine::error(format!(
+                                    "Failed to refresh runtime: {err:#}"
+                                )));
+                            }
+                            self.semantic_hits = None;
+                            self.update_filtered();
+                            if self.status.is_none() {
+                                self.status = Some(StatusLine::success("Memory runtime disabled"));
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        self.status = Some(StatusLine::error(format!(
+                            "Failed to update runtime: {err:#}"
+                        )));
+                    }
+                }
+            }
             KeyCode::Char('m') if key.modifiers.is_empty() => {
                 let new_mode = match self.preview_mode {
                     MemoryPreviewMode::Enabled => MemoryPreviewMode::Disabled,
@@ -1048,9 +1123,15 @@ impl MemoryManagerState {
                 }
             }
             KeyCode::Char('n') => {
-                self.modal = Some(ModalState::Form(MemoryFormState::for_create(
-                    self.min_confidence.max(0.5),
-                )));
+                if !self.enabled {
+                    self.status = Some(StatusLine::error(
+                        "Memory runtime disabled; enable it to create memories",
+                    ));
+                } else {
+                    self.modal = Some(ModalState::Form(MemoryFormState::for_create(
+                        self.min_confidence.max(0.5),
+                    )));
+                }
             }
             KeyCode::Char('d') => {
                 if let Some(row) = self.current_row() {
@@ -1217,6 +1298,16 @@ impl MemoryManagerState {
         let search_line = Line::from(vec!["[S]earch: ".cyan().bold(), query_display.into()]);
         Paragraph::new(search_line).render(columns[0], frame.buffer_mut());
 
+        let runtime_line = if self.enabled {
+            "Runtime: on".green().bold()
+        } else {
+            "Runtime: off".red().bold()
+        };
+        let toggle_hint = if self.enabled {
+            " [e] disable".dim()
+        } else {
+            " [e] enable".dim()
+        };
         let mode_line = format!(
             "Select [m]ode: {}",
             match preview_mode {
@@ -1226,9 +1317,14 @@ impl MemoryManagerState {
         )
         .cyan()
         .bold();
-        Paragraph::new(Line::from(vec![mode_line]))
-            .alignment(ratatui::layout::Alignment::Right)
-            .render(columns[1], frame.buffer_mut());
+        Paragraph::new(Line::from(vec![
+            runtime_line,
+            toggle_hint,
+            "   ".into(),
+            mode_line,
+        ]))
+        .alignment(Alignment::Right)
+        .render(columns[1], frame.buffer_mut());
 
         Paragraph::new(self.model_status_line()).render(rows[1], frame.buffer_mut());
 

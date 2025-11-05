@@ -54,6 +54,10 @@ enum MemoryAction {
         #[arg(long = "yes", short = 'y')]
         force: bool,
     },
+    /// Enable the memory runtime.
+    Enable,
+    /// Disable the memory runtime.
+    Disable,
     /// Show memory statistics (hits, misses, disk usage).
     Stats,
     /// List stored memories.
@@ -217,6 +221,8 @@ pub async fn run(memory_cli: MemoryCli, root_overrides: CliConfigOverrides) -> a
         MemoryAction::Init => init(memory_root.clone()).await?,
         MemoryAction::Rebuild => rebuild(memory_root.clone()).await?,
         MemoryAction::Reset { force } => reset(memory_root.clone(), force).await?,
+        MemoryAction::Enable => enable(memory_root.clone()).await?,
+        MemoryAction::Disable => disable(memory_root.clone()).await?,
         MemoryAction::Stats => stats(memory_root.clone()).await?,
         MemoryAction::List(args) => list(memory_root.clone(), args).await?,
         MemoryAction::Create(args) => create(memory_root.clone(), args).await?,
@@ -263,6 +269,30 @@ async fn reset(memory_root: PathBuf, force: bool) -> anyhow::Result<()> {
         .context("failed to open memory store")?;
     store.reset().context("failed to reset memory store")?;
     println!("Memory store reset");
+    Ok(())
+}
+
+async fn enable(memory_root: PathBuf) -> anyhow::Result<()> {
+    set_enabled(memory_root, true).await
+}
+
+async fn disable(memory_root: PathBuf) -> anyhow::Result<()> {
+    set_enabled(memory_root, false).await
+}
+
+async fn set_enabled(memory_root: PathBuf, enabled: bool) -> anyhow::Result<()> {
+    let manager = MemorySettingsManager::load(memory_root)
+        .await
+        .context("failed to load memory settings")?;
+    manager
+        .update(|settings| settings.enabled = enabled)
+        .await
+        .context("failed to persist memory settings")?;
+    if enabled {
+        println!("Memory runtime enabled");
+    } else {
+        println!("Memory runtime disabled");
+    }
     Ok(())
 }
 

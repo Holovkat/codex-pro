@@ -123,12 +123,41 @@ impl MemoryPreviewModeExt for MemoryPreviewMode {
     }
 }
 
+fn default_enabled() -> bool {
+    true
+}
+
+fn default_min_confidence() -> f32 {
+    0.75
+}
+
+fn default_preview_mode() -> MemoryPreviewMode {
+    MemoryPreviewMode::Enabled
+}
+
+fn default_max_tokens() -> u32 {
+    400
+}
+
+fn default_retention_days() -> u32 {
+    30
+}
+
+const fn default_prefer_pull_suggestions() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MemorySettings {
+    #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default = "default_min_confidence")]
     pub min_confidence: f32,
+    #[serde(default = "default_preview_mode")]
     pub preview_mode: MemoryPreviewMode,
+    #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+    #[serde(default = "default_retention_days")]
     pub retention_days: u32,
     #[serde(default = "default_prefer_pull_suggestions")]
     pub prefer_pull_suggestions: bool,
@@ -137,18 +166,14 @@ pub struct MemorySettings {
 impl Default for MemorySettings {
     fn default() -> Self {
         Self {
-            enabled: true,
-            min_confidence: 0.75,
-            preview_mode: MemoryPreviewMode::Enabled,
-            max_tokens: 400,
-            retention_days: 30,
+            enabled: default_enabled(),
+            min_confidence: default_min_confidence(),
+            preview_mode: default_preview_mode(),
+            max_tokens: default_max_tokens(),
+            retention_days: default_retention_days(),
             prefer_pull_suggestions: default_prefer_pull_suggestions(),
         }
     }
-}
-
-const fn default_prefer_pull_suggestions() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -212,6 +237,7 @@ pub fn clean_summary(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn memory_event_round_trips_json() {
@@ -236,5 +262,24 @@ mod tests {
         assert_eq!(round_trip.text, "Discussed LightMem architecture");
         assert_eq!(round_trip.metadata, metadata);
         assert_eq!(round_trip.event_id, event.event_id);
+    }
+
+    #[test]
+    fn deserialises_settings_without_enabled_field() {
+        let payload = json!({
+            "min_confidence": 0.9,
+            "preview_mode": "disabled",
+            "max_tokens": 256,
+            "retention_days": 14,
+            "prefer_pull_suggestions": false
+        });
+        let settings: MemorySettings =
+            serde_json::from_value(payload).expect("memory settings deserialize");
+        assert!(settings.enabled);
+        assert!((settings.min_confidence - 0.9).abs() < f32::EPSILON);
+        assert_eq!(settings.preview_mode, MemoryPreviewMode::Disabled);
+        assert_eq!(settings.max_tokens, 256);
+        assert_eq!(settings.retention_days, 14);
+        assert!(!settings.prefer_pull_suggestions);
     }
 }

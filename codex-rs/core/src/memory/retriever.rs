@@ -166,6 +166,7 @@ mod tests {
     use crate::memory::types::MemorySource;
     use codex_protocol::protocol::MemoryPreviewMode;
     use fastembed::TextEmbedding;
+    use fastembed::TextInitOptions;
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::sync::Mutex;
@@ -187,7 +188,10 @@ mod tests {
                 .expect("load model"),
         );
         let embedder = Arc::new(Mutex::new(
-            TextEmbedding::try_new(Default::default()).expect("init embedder"),
+            TextEmbedding::try_new(
+                TextInitOptions::default().with_cache_dir(root.path().join("fastembed-cache")),
+            )
+            .expect("init embedder"),
         ));
         MemoryRuntime {
             store,

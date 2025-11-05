@@ -79,6 +79,7 @@ use crate::memory::MemoryRecorder;
 use crate::memory::MemoryRecorderConfig;
 use crate::memory::MemoryRetriever;
 use crate::memory::MemoryRuntime;
+use crate::memory::MemorySettingsManager;
 use crate::model_family::find_family_for_model;
 use crate::openai_model_info::get_model_info;
 use crate::project_doc::get_user_instructions;
@@ -262,11 +263,12 @@ pub(crate) struct Session {
     state: Mutex<SessionState>,
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) services: SessionServices,
-    memory_recorder: MemoryRecorder,
+    memory_recorder: Mutex<MemoryRecorder>,
     #[allow(dead_code)]
-    memory_distiller: MemoryDistiller,
+    memory_distiller: Mutex<MemoryDistiller>,
     #[allow(dead_code)]
-    memory_runtime: Option<MemoryRuntime>,
+    memory_runtime: Mutex<Option<MemoryRuntime>>,
+    memory_root: PathBuf,
     next_internal_sub_id: AtomicU64,
 }
 
@@ -580,18 +582,30 @@ impl Session {
         };
 
         let memory_root = resumed_root.unwrap_or_else(|| config.codex_home.join("memory"));
-        let (memory_distiller, memory_runtime) = match MemoryDistiller::spawn(memory_root).await {
-            Ok((distiller, runtime)) => (distiller, Some(runtime)),
-            Err(err) => {
-                warn!("disabling memory distillation: {err:#}");
-                (MemoryDistiller::noop(), None)
-            }
-        };
-        let memory_recorder = MemoryRecorder::new(MemoryRecorderConfig {
-            conversation_id,
-            session_source: Some(format!("{session_source:?}")),
-            sink: Some(memory_distiller.sender()),
-        });
+        let (initial_distiller, initial_runtime, initial_recorder) =
+            match MemoryDistiller::spawn(memory_root.clone()).await {
+                Ok((distiller, runtime)) => {
+                    let settings = runtime.settings.get().await;
+                    if settings.enabled {
+                        let recorder = MemoryRecorder::new(MemoryRecorderConfig {
+                            conversation_id,
+                            session_source: Some(format!("{session_source:?}")),
+                            sink: Some(distiller.sender()),
+                        });
+                        (distiller, Some(runtime), recorder)
+                    } else {
+                        (distiller, None, MemoryRecorder::disabled(conversation_id))
+                    }
+                }
+                Err(err) => {
+                    warn!("disabling memory distillation: {err:#}");
+                    (
+                        MemoryDistiller::noop(),
+                        None,
+                        MemoryRecorder::disabled(conversation_id),
+                    )
+                }
+            };
 
         let sess = Arc::new(Session {
             conversation_id,
@@ -599,9 +613,10 @@ impl Session {
             state: Mutex::new(state),
             active_turn: Mutex::new(None),
             services,
-            memory_recorder,
-            memory_distiller,
-            memory_runtime,
+            memory_recorder: Mutex::new(initial_recorder),
+            memory_distiller: Mutex::new(initial_distiller),
+            memory_runtime: Mutex::new(initial_runtime),
+            memory_root,
             next_internal_sub_id: AtomicU64::new(0),
         });
 
@@ -967,7 +982,10 @@ impl Session {
     async fn record_into_history(&self, items: &[ResponseItem]) {
         let mut state = self.state.lock().await;
         state.record_items(items.iter());
-        self.memory_recorder.record_response_items(items);
+        {
+            let recorder = self.memory_recorder.lock().await;
+            recorder.record_response_items(items);
+        }
     }
 
     async fn replace_history(&self, items: Vec<ResponseItem>) {
@@ -1005,12 +1023,80 @@ impl Session {
         items
     }
 
+    async fn ensure_memory_runtime(&self) -> Option<MemoryRuntime> {
+        if let Some(runtime) = {
+            let runtime_guard = self.memory_runtime.lock().await;
+            runtime_guard.clone()
+        } {
+            if runtime.settings.get().await.enabled {
+                return Some(runtime);
+            }
+            {
+                let mut runtime_guard = self.memory_runtime.lock().await;
+                runtime_guard.take();
+            }
+            {
+                let mut distiller = self.memory_distiller.lock().await;
+                *distiller = MemoryDistiller::noop();
+            }
+            {
+                let mut recorder = self.memory_recorder.lock().await;
+                recorder.set_sink(None);
+            }
+        }
+
+        let should_enable = match MemorySettingsManager::load(self.memory_root.clone()).await {
+            Ok(manager) => manager.get().await.enabled,
+            Err(err) => {
+                warn!("failed to load memory settings: {err:#}");
+                return None;
+            }
+        };
+        if !should_enable {
+            return None;
+        }
+
+        match MemoryDistiller::spawn(self.memory_root.clone()).await {
+            Ok((distiller, runtime)) => {
+                if !runtime.settings.get().await.enabled {
+                    {
+                        let mut runtime_guard = self.memory_runtime.lock().await;
+                        runtime_guard.take();
+                    }
+                    {
+                        let mut dist = self.memory_distiller.lock().await;
+                        *dist = MemoryDistiller::noop();
+                    }
+                    return None;
+                }
+                let sender = distiller.sender();
+                {
+                    let mut dist = self.memory_distiller.lock().await;
+                    *dist = distiller;
+                }
+                {
+                    let mut recorder = self.memory_recorder.lock().await;
+                    recorder.set_sink(Some(sender));
+                }
+                {
+                    let mut runtime_guard = self.memory_runtime.lock().await;
+                    *runtime_guard = Some(runtime.clone());
+                }
+                Some(runtime)
+            }
+            Err(err) => {
+                warn!("failed to reinitialize memory runtime: {err:#}");
+                None
+            }
+        }
+    }
+
     async fn inject_memory_context(
         &self,
         _turn_context: &TurnContext,
         turn_input: &mut Vec<ResponseItem>,
     ) {
-        let Some(runtime) = &self.memory_runtime else {
+        let Some(runtime) = self.ensure_memory_runtime().await else {
             return;
         };
         if runtime.settings.get().await.prefer_pull_suggestions {
@@ -1320,8 +1406,8 @@ impl Session {
         self.services.show_raw_agent_reasoning
     }
 
-    pub(crate) fn memory_runtime(&self) -> Option<MemoryRuntime> {
-        self.memory_runtime.clone()
+    pub(crate) async fn memory_runtime(&self) -> Option<MemoryRuntime> {
+        self.ensure_memory_runtime().await
     }
 }
 
@@ -1524,7 +1610,7 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                 }
             }
             Op::MemoryPreviewDecision { accepted_ids } => {
-                if let Some(runtime) = &sess.memory_runtime {
+                if let Some(runtime) = sess.ensure_memory_runtime().await {
                     let accepted_set: HashSet<Uuid> = accepted_ids
                         .into_iter()
                         .filter_map(|id| Uuid::parse_str(&id).ok())
@@ -2891,9 +2977,10 @@ mod tests {
             state: Mutex::new(state),
             active_turn: Mutex::new(None),
             services,
-            memory_recorder: MemoryRecorder::disabled(conversation_id),
-            memory_distiller: MemoryDistiller::noop(),
-            memory_runtime: None,
+            memory_recorder: Mutex::new(MemoryRecorder::disabled(conversation_id)),
+            memory_distiller: Mutex::new(MemoryDistiller::noop()),
+            memory_runtime: Mutex::new(None),
+            memory_root: PathBuf::new(),
             next_internal_sub_id: AtomicU64::new(0),
         };
 
@@ -2962,9 +3049,10 @@ mod tests {
             state: Mutex::new(state),
             active_turn: Mutex::new(None),
             services,
-            memory_recorder: MemoryRecorder::disabled(conversation_id),
-            memory_distiller: MemoryDistiller::noop(),
-            memory_runtime: None,
+            memory_recorder: Mutex::new(MemoryRecorder::disabled(conversation_id)),
+            memory_distiller: Mutex::new(MemoryDistiller::noop()),
+            memory_runtime: Mutex::new(None),
+            memory_root: PathBuf::new(),
             next_internal_sub_id: AtomicU64::new(0),
         });
 

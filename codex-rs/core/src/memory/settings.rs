@@ -1,8 +1,11 @@
+use std::path::Path;
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use anyhow::Context;
 use anyhow::Result;
 use tokio::sync::RwLock;
+use tracing::warn;
 
 use super::types::MemorySettings;
 
@@ -12,40 +15,32 @@ const SETTINGS_FILENAME: &str = "settings.json";
 pub struct MemorySettingsManager {
     path: PathBuf,
     state: RwLock<MemorySettings>,
+    modified: RwLock<Option<SystemTime>>,
 }
 
 impl MemorySettingsManager {
     pub async fn load(root: PathBuf) -> Result<Self> {
         let path = root.join(SETTINGS_FILENAME);
-        let settings = if let Ok(bytes) = tokio::fs::read(&path).await {
-            serde_json::from_slice::<MemorySettings>(&bytes)
-                .unwrap_or_else(|_| MemorySettings::default())
+        let (settings, modified) = if let Ok(bytes) = tokio::fs::read(&path).await {
+            let settings = serde_json::from_slice::<MemorySettings>(&bytes)
+                .unwrap_or_else(|_| MemorySettings::default());
+            let modified = file_modified(&path).await;
+            (settings, modified)
         } else {
-            MemorySettings::default()
+            (MemorySettings::default(), None)
         };
         Ok(Self {
             path,
             state: RwLock::new(settings),
+            modified: RwLock::new(modified),
         })
     }
 
     pub async fn get(&self) -> MemorySettings {
-        match tokio::fs::read(&self.path).await {
-            Ok(bytes) => match serde_json::from_slice::<MemorySettings>(&bytes) {
-                Ok(fresh) => {
-                    let mut guard = self.state.write().await;
-                    if *guard != fresh {
-                        *guard = fresh;
-                    }
-                    guard.clone()
-                }
-                Err(_) => self.state.read().await.clone(),
-            },
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                self.state.read().await.clone()
-            }
-            Err(_) => self.state.read().await.clone(),
+        if let Err(err) = self.refresh().await {
+            warn!("failed to refresh memory settings from disk: {err:#}");
         }
+        self.state.read().await.clone()
     }
 
     pub async fn set(&self, new_settings: MemorySettings) -> Result<MemorySettings> {
@@ -79,8 +74,40 @@ impl MemorySettingsManager {
         tokio::fs::rename(&tmp_path, &self.path)
             .await
             .with_context(|| format!("unable to move {} into place", self.path.display()))?;
+        let timestamp = file_modified(&self.path).await;
+        let mut modified = self.modified.write().await;
+        *modified = timestamp;
         Ok(())
     }
+
+    async fn refresh(&self) -> Result<()> {
+        let timestamp = file_modified(&self.path).await;
+        {
+            let current = self.modified.read().await;
+            if timestamp.is_none() || *current == timestamp {
+                return Ok(());
+            }
+        }
+        let bytes = tokio::fs::read(&self.path)
+            .await
+            .with_context(|| format!("unable to read {}", self.path.display()))?;
+        let parsed = serde_json::from_slice::<MemorySettings>(&bytes)
+            .context("unable to parse memory settings")?;
+        {
+            let mut guard = self.state.write().await;
+            *guard = parsed;
+        }
+        let mut modified = self.modified.write().await;
+        *modified = timestamp;
+        Ok(())
+    }
+}
+
+async fn file_modified(path: &Path) -> Option<SystemTime> {
+    tokio::fs::metadata(path)
+        .await
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
 }
 
 #[cfg(test)]
@@ -119,24 +146,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_reloads_external_changes() {
+    async fn reloads_changes_from_disk() {
         let dir = tempfile::tempdir().expect("tmp dir");
         let manager = MemorySettingsManager::load(dir.path().to_path_buf())
             .await
             .expect("load");
-
-        let mut updated = manager.get().await;
-        updated.preview_mode = MemoryPreviewMode::Disabled;
-        updated.min_confidence = 0.8;
-        updated.max_tokens = 512;
-        updated.retention_days = 45;
-
-        let raw = serde_json::to_vec_pretty(&updated).expect("serialize settings");
-        tokio::fs::write(manager.path.clone(), raw)
+        manager
+            .update(|settings| settings.enabled = true)
             .await
-            .expect("write updated settings");
+            .expect("enable");
 
-        let reloaded = manager.get().await;
-        assert_eq!(reloaded, updated);
+        let mut external = manager.get().await;
+        external.enabled = false;
+        external.preview_mode = MemoryPreviewMode::Disabled;
+        external.min_confidence = 0.8;
+        external.max_tokens = 512;
+        external.retention_days = 45;
+        external.prefer_pull_suggestions = false;
+        let raw = serde_json::to_vec_pretty(&external).expect("serialize settings");
+        let path = dir.path().join(SETTINGS_FILENAME);
+        tokio::fs::write(&path, raw).await.expect("write");
+
+        let refreshed = manager.get().await;
+        assert_eq!(refreshed, external);
     }
 }

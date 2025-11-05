@@ -47,6 +47,10 @@ impl MemoryRecorder {
         Self::new(MemoryRecorderConfig::disabled(conversation_id))
     }
 
+    pub fn set_sink(&mut self, sink: Option<UnboundedSender<MemoryEvent>>) {
+        self.sink = sink;
+    }
+
     pub fn record_response_items(&self, items: &[ResponseItem]) {
         for item in items {
             if let Some(event) = self.event_for_response_item(item) {

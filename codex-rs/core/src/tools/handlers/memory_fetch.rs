@@ -56,7 +56,7 @@ impl ToolHandler for MemoryFetchHandler {
             ));
         }
 
-        let runtime = session.memory_runtime().ok_or_else(|| {
+        let runtime = session.memory_runtime().await.ok_or_else(|| {
             FunctionCallError::RespondToModel(
                 "memory runtime is not available in this session".to_string(),
             )
