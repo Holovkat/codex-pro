@@ -261,10 +261,6 @@ impl BottomPaneView for ApprovalOverlay {
         self.enqueue_request(request);
         None
     }
-
-    fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
-        self.list.cursor_pos(area)
-    }
 }
 
 impl Renderable for ApprovalOverlay {
@@ -274,6 +270,10 @@ impl Renderable for ApprovalOverlay {
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
         self.list.render(area, buf);
+    }
+
+    fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        self.list.cursor_pos(area)
     }
 }
 

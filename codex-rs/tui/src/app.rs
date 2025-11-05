@@ -30,6 +30,7 @@ use crate::index_worker::IndexWorker;
 use crate::memory_manager::run_memory_manager;
 use crate::pager_overlay::Overlay;
 use crate::render::highlight::highlight_bash_to_lines;
+use crate::render::renderable::Renderable;
 use crate::resume_picker::ResumeSelection;
 use crate::tui;
 use crate::tui::TuiEvent;
@@ -1229,7 +1230,7 @@ impl App {
                     tui.draw(
                         self.chat_widget.desired_height(tui.terminal.size()?.width),
                         |frame| {
-                            frame.render_widget_ref(&self.chat_widget, frame.area());
+                            self.chat_widget.render(frame.area(), frame.buffer);
                             if let Some((x, y)) = self.chat_widget.cursor_pos(frame.area()) {
                                 frame.set_cursor_position((x, y));
                             }
