@@ -6,6 +6,7 @@ mod abort_tasks;
 mod apply_patch_cli;
 #[cfg(not(target_os = "windows"))]
 mod approvals;
+mod auth_refresh;
 mod cli_stream;
 mod client;
 mod codex_delegate;
