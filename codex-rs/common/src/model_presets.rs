@@ -38,69 +38,141 @@ pub struct ModelPreset {
 
 impl ModelPreset {
     pub fn provider_label(&self) -> &str {
-        self.provider_label.as_deref().unwrap_or(OPENAI_PROVIDER_ID)
+        self.provider_label.as_deref().unwrap_or(OPENAI_PROVIDER_LABEL)
     }
 }
 
-fn builtin_presets() -> Vec<ModelPreset> {
-    vec![
-        ModelPreset {
-            id: "gpt-5-codex".to_string(),
-            model: "gpt-5-codex".to_string(),
-            display_name: "gpt-5-codex".to_string(),
-            description: "Optimized for coding tasks with many tools.".to_string(),
-            default_reasoning_effort: ReasoningEffort::Medium,
-            supported_reasoning_efforts: vec![
-                ReasoningEffortPreset {
-                    effort: ReasoningEffort::Low,
-                    description: "Fastest responses with limited reasoning".to_string(),
-                },
-                ReasoningEffortPreset {
-                    effort: ReasoningEffort::Medium,
-                    description: "Dynamically adjusts reasoning based on the task".to_string(),
-                },
-                ReasoningEffortPreset {
-                    effort: ReasoningEffort::High,
-                    description: "Maximizes reasoning depth for complex or ambiguous problems"
-                        .to_string(),
-                },
-            ],
-            is_default: true,
-            provider_id: Some(OPENAI_PROVIDER_ID.to_string()),
-            provider_label: Some(OPENAI_PROVIDER_LABEL.to_string()),
-        },
-        ModelPreset {
-            id: "gpt-5".to_string(),
-            model: "gpt-5".to_string(),
-            display_name: "gpt-5".to_string(),
-            description: "Broad world knowledge with strong general reasoning.".to_string(),
-            default_reasoning_effort: ReasoningEffort::Medium,
-            supported_reasoning_efforts: vec![
-                ReasoningEffortPreset {
-                    effort: ReasoningEffort::Minimal,
-                    description: "Fastest responses with little reasoning".to_string(),
-                },
-                ReasoningEffortPreset {
-                    effort: ReasoningEffort::Low,
-                    description: "Balances speed with some reasoning; useful for straightforward queries and short explanations".to_string(),
-                },
-                ReasoningEffortPreset {
-                    effort: ReasoningEffort::Medium,
-                    description: "Provides a solid balance of reasoning depth and latency for general-purpose tasks".to_string(),
-                },
-                ReasoningEffortPreset {
-                    effort: ReasoningEffort::High,
-                    description: "Maximizes reasoning depth for complex or ambiguous problems"
-                        .to_string(),
-                },
-            ],
-            is_default: false,
-            provider_id: Some(OPENAI_PROVIDER_ID.to_string()),
-            provider_label: Some(OPENAI_PROVIDER_LABEL.to_string()),
-        },
-    ]
+#[derive(Clone, Copy)]
+struct StaticReasoningEffortPreset {
+    effort: ReasoningEffort,
+    description: &'static str,
 }
 
-pub fn builtin_model_presets(_auth_mode: Option<AuthMode>) -> Vec<ModelPreset> {
-    builtin_presets()
+#[derive(Clone, Copy)]
+struct StaticModelPreset {
+    id: &'static str,
+    model: &'static str,
+    display_name: &'static str,
+    description: &'static str,
+    default_reasoning_effort: ReasoningEffort,
+    supported_reasoning_efforts: &'static [StaticReasoningEffortPreset],
+    is_default: bool,
+}
+
+const PRESETS: &[StaticModelPreset] = &[
+    StaticModelPreset {
+        id: "gpt-5-codex",
+        model: "gpt-5-codex",
+        display_name: "gpt-5-codex",
+        description: "Optimized for codex.",
+        default_reasoning_effort: ReasoningEffort::Medium,
+        supported_reasoning_efforts: &[
+            StaticReasoningEffortPreset {
+                effort: ReasoningEffort::Low,
+                description: "Fastest responses with limited reasoning",
+            },
+            StaticReasoningEffortPreset {
+                effort: ReasoningEffort::Medium,
+                description: "Dynamically adjusts reasoning based on the task",
+            },
+            StaticReasoningEffortPreset {
+                effort: ReasoningEffort::High,
+                description: "Maximizes reasoning depth for complex or ambiguous problems",
+            },
+        ],
+        is_default: true,
+    },
+    StaticModelPreset {
+        id: "desertfox",
+        model: "desertfox",
+        display_name: "desertfox",
+        description: "???",
+        default_reasoning_effort: ReasoningEffort::Medium,
+        supported_reasoning_efforts: &[
+            StaticReasoningEffortPreset {
+                effort: ReasoningEffort::Medium,
+                description: "Dynamically adjusts reasoning based on the task",
+            },
+            StaticReasoningEffortPreset {
+                effort: ReasoningEffort::High,
+                description: "Maximizes reasoning depth for complex or ambiguous problems",
+            },
+        ],
+        is_default: false,
+    },
+    StaticModelPreset {
+        id: "gpt-5",
+        model: "gpt-5",
+        display_name: "gpt-5",
+        description: "Broad world knowledge with strong general reasoning.",
+        default_reasoning_effort: ReasoningEffort::Medium,
+        supported_reasoning_efforts: &[
+            StaticReasoningEffortPreset {
+                effort: ReasoningEffort::Minimal,
+                description: "Fastest responses with little reasoning",
+            },
+            StaticReasoningEffortPreset {
+                effort: ReasoningEffort::Low,
+                description: "Balances speed with some reasoning; useful for straightforward queries and short explanations",
+            },
+            StaticReasoningEffortPreset {
+                effort: ReasoningEffort::Medium,
+                description: "Provides a solid balance of reasoning depth and latency for general-purpose tasks",
+            },
+            StaticReasoningEffortPreset {
+                effort: ReasoningEffort::High,
+                description: "Maximizes reasoning depth for complex or ambiguous problems",
+            },
+        ],
+        is_default: false,
+    },
+];
+
+impl From<&StaticReasoningEffortPreset> for ReasoningEffortPreset {
+    fn from(value: &StaticReasoningEffortPreset) -> Self {
+        Self {
+            effort: value.effort,
+            description: value.description.to_string(),
+        }
+    }
+}
+
+impl From<&StaticModelPreset> for ModelPreset {
+    fn from(value: &StaticModelPreset) -> Self {
+        Self {
+            id: value.id.to_string(),
+            model: value.model.to_string(),
+            display_name: value.display_name.to_string(),
+            description: value.description.to_string(),
+            default_reasoning_effort: value.default_reasoning_effort,
+            supported_reasoning_efforts: value
+                .supported_reasoning_efforts
+                .iter()
+                .map(ReasoningEffortPreset::from)
+                .collect(),
+            is_default: value.is_default,
+            provider_id: Some(OPENAI_PROVIDER_ID.to_string()),
+            provider_label: Some(OPENAI_PROVIDER_LABEL.to_string()),
+        }
+    }
+}
+
+pub fn builtin_model_presets(auth_mode: Option<AuthMode>) -> Vec<ModelPreset> {
+    let allow_desertfox = matches!(auth_mode, Some(AuthMode::ChatGPT));
+    PRESETS
+        .iter()
+        .filter(|preset| allow_desertfox || preset.id != "desertfox")
+        .map(ModelPreset::from)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_one_default_model_is_configured() {
+        let defaults = PRESETS.iter().filter(|preset| preset.is_default).count();
+        assert_eq!(defaults, 1);
+    }
 }
