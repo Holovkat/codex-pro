@@ -5,6 +5,7 @@ use crate::test_backend::VT100Backend;
 use crate::tui::FrameRequester;
 use assert_matches::assert_matches;
 use codex_agentic_core::merge_custom_providers_into_config;
+use codex_agentic_core::provider::custom_providers;
 use codex_agentic_core::settings;
 use codex_agentic_core::settings::CustomProvider;
 use codex_agentic_core::settings::Settings;
@@ -55,6 +56,7 @@ use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
 use insta::assert_snapshot;
 use pretty_assertions::assert_eq;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
@@ -416,6 +418,7 @@ fn make_chatwidget_manual() -> (
         bottom_pane: bottom,
         active_cell: None,
         config: cfg.clone(),
+        custom_providers: BTreeMap::new(),
         auth_manager,
         session_header: SessionHeader::new(cfg.model),
         initial_user_message: None,
@@ -1601,8 +1604,7 @@ fn single_reasoning_option_skips_selection() {
         default_reasoning_effort: ReasoningEffortConfig::High,
         supported_reasoning_efforts: vec![ReasoningEffortPreset {
             effort: ReasoningEffortConfig::High,
-            description: "Maximizes reasoning depth for complex or ambiguous problems"
-                .to_string(),
+            description: "Maximizes reasoning depth for complex or ambiguous problems".to_string(),
         }],
         is_default: false,
         provider_id: None,
@@ -1654,6 +1656,7 @@ fn model_popup_lists_custom_provider_models() {
 
     settings::init_global(custom_settings.clone());
     merge_custom_providers_into_config(&mut chat.config, &custom_settings);
+    chat.sync_custom_providers(custom_providers(&custom_settings));
 
     if let Some(info) = chat.config.model_providers.get("zai").cloned() {
         chat.set_model_provider("zai", &info);

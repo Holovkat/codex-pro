@@ -39,7 +39,7 @@ fn exec_records_agent_metadata_and_flags() -> anyhow::Result<()> {
 
     let instances_dir = agents_root.join("runner").join("instances");
     let mut run_dirs: Vec<_> = fs::read_dir(&instances_dir)?
-        .filter_map(|entry| entry.ok())
+        .filter_map(std::result::Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.is_dir())
         .collect();

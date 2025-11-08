@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -118,7 +119,6 @@ use std::path::Path;
 
 use chrono::Local;
 use codex_agentic_core::provider::DEFAULT_OPENAI_PROVIDER_ID;
-use codex_agentic_core::settings;
 use codex_agentic_core::settings::CustomProvider;
 use codex_common::approval_presets::ApprovalPreset;
 use codex_common::approval_presets::builtin_approval_presets;
@@ -260,6 +260,7 @@ pub(crate) struct ChatWidget {
     bottom_pane: BottomPane,
     active_cell: Option<Box<dyn HistoryCell>>,
     config: Config,
+    custom_providers: BTreeMap<String, CustomProvider>,
     auth_manager: Arc<AuthManager>,
     session_header: SessionHeader,
     initial_user_message: Option<UserMessage>,
@@ -778,7 +779,9 @@ impl ChatWidget {
         if self.retry_status_header.is_none() {
             self.retry_status_header = Some(self.current_status_header.clone());
         }
-        self.set_status_header(message);
+        self.set_status_header(message.clone());
+        self.add_to_history(history_cell::new_stream_error_event(message));
+        self.request_redraw();
     }
 
     /// Periodic tick to commit at most one queued line to history with a small delay,
@@ -1051,6 +1054,7 @@ impl ChatWidget {
             }),
             active_cell: None,
             config: config.clone(),
+            custom_providers: BTreeMap::new(),
             auth_manager,
             session_header: SessionHeader::new(config.model),
             initial_user_message: create_initial_user_message(
@@ -1119,6 +1123,7 @@ impl ChatWidget {
             }),
             active_cell: None,
             config: config.clone(),
+            custom_providers: BTreeMap::new(),
             auth_manager,
             session_header: SessionHeader::new(config.model),
             initial_user_message: create_initial_user_message(
@@ -1892,9 +1897,12 @@ impl ChatWidget {
         let display_name = preset.display_name.to_string();
         let default_effort: ReasoningEffortConfig = preset.default_reasoning_effort;
 
+        let provider_id = self.config.model_provider_id.clone();
         let switch_actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+            let provider_for_action = provider_id.clone();
             tx.send(AppEvent::CodexOp(Op::OverrideTurnContext {
                 cwd: None,
+                provider_id: Some(provider_for_action),
                 approval_policy: None,
                 sandbox_policy: None,
                 model: Some(switch_model.clone()),
@@ -1909,14 +1917,13 @@ impl ChatWidget {
         let description = if preset.description.is_empty() {
             Some("Uses fewer credits for upcoming turns.".to_string())
         } else {
-            Some(preset.description.to_string())
+            Some(preset.description)
         };
 
         let items = vec![
             SelectionItem {
                 name: format!("Switch to {display_name}"),
                 description,
-                selected_description: None,
                 is_current: false,
                 actions: switch_actions,
                 dismiss_on_select: true,
@@ -1925,7 +1932,6 @@ impl ChatWidget {
             SelectionItem {
                 name: "Keep current model".to_string(),
                 description: None,
-                selected_description: None,
                 is_current: false,
                 actions: keep_actions,
                 dismiss_on_select: true,
@@ -1935,9 +1941,7 @@ impl ChatWidget {
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
             title: Some("Approaching rate limits".to_string()),
-            subtitle: Some(format!(
-                "You've used over 90% of your limit. Switch to {display_name} for lower credit usage?"
-            )),
+            subtitle: Some(format!("Switch to {display_name} for lower credit usage?")),
             footer_hint: Some(standard_popup_hint_line()),
             items,
             ..Default::default()
@@ -2009,12 +2013,11 @@ impl ChatWidget {
     }
 
     fn custom_model_presets(&self) -> Vec<ModelPreset> {
-        let settings = settings::global();
         let mut presets = Vec::new();
         let current_model = self.config.model.as_str();
         let current_provider = self.config.model_provider_id.as_str();
 
-        for (provider_id, provider) in settings.custom_providers() {
+        for (provider_id, provider) in &self.custom_providers {
             if provider_id == DEFAULT_OPENAI_PROVIDER_ID {
                 continue;
             }
@@ -2130,9 +2133,9 @@ impl ChatWidget {
                 .clone()
                 .or_else(|| Some(self.config.model_provider_id.clone()));
             if let Some(effort) = choices.first().and_then(|c| c.stored) {
-                self.apply_model_and_effort(preset.model.to_string(), Some(effort), provider_hint);
+                self.apply_model_and_effort(preset.model, Some(effort), provider_hint);
             } else {
-                self.apply_model_and_effort(preset.model.to_string(), None, provider_hint);
+                self.apply_model_and_effort(preset.model, None, provider_hint);
             }
             return;
         }
@@ -2172,9 +2175,7 @@ impl ChatWidget {
                         .map(|option| option.description.to_string())
                 })
                 .filter(|text| !text.is_empty());
-            if preset.model.starts_with("gpt-5-codex")
-                && effort == ReasoningEffortConfig::High
-            {
+            if preset.model.starts_with("gpt-5-codex") && effort == ReasoningEffortConfig::High {
                 const WARNING: &str =
                     "⚠ High reasoning effort can quickly consume Plus plan rate limits.";
                 description = Some(
@@ -2324,13 +2325,34 @@ impl ChatWidget {
                         preset: preset_clone.clone(),
                     });
                 })]
-            } else if cfg!(target_os = "windows")
-                && preset.id == "auto"
-                && codex_core::get_platform_sandbox().is_none()
-            {
-                vec![Box::new(|tx| {
-                    tx.send(AppEvent::ShowWindowsAutoModeInstructions);
-                })]
+            } else if preset.id == "auto" {
+                #[cfg(target_os = "windows")]
+                {
+                    if codex_core::get_platform_sandbox().is_none() {
+                        vec![Box::new(|tx| {
+                            tx.send(AppEvent::ShowWindowsAutoModeInstructions);
+                        })]
+                    } else if !self
+                        .config
+                        .notices
+                        .hide_world_writable_warning
+                        .unwrap_or(false)
+                        && self.windows_world_writable_flagged()
+                    {
+                        let preset_clone = preset.clone();
+                        vec![Box::new(move |tx| {
+                            tx.send(AppEvent::OpenWorldWritableWarningConfirmation {
+                                preset: Some(preset_clone.clone()),
+                            });
+                        })]
+                    } else {
+                        self.approval_preset_actions(preset.approval, preset.sandbox.clone())
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    self.approval_preset_actions(preset.approval, preset.sandbox.clone())
+                }
             } else {
                 self.approval_preset_actions(preset.approval, preset.sandbox.clone())
             };
@@ -2373,6 +2395,24 @@ impl ChatWidget {
             tx.send(AppEvent::UpdateAskForApprovalPolicy(approval));
             tx.send(AppEvent::UpdateSandboxPolicy(sandbox_clone));
         })]
+    }
+
+    #[cfg(target_os = "windows")]
+    fn windows_world_writable_flagged(&self) -> bool {
+        let mut env_map: HashMap<String, String> = HashMap::new();
+        for (k, v) in std::env::vars() {
+            env_map.insert(k, v);
+        }
+        match codex_windows_sandbox::preflight_audit_everyone_writable(&self.config.cwd, &env_map) {
+            Ok(()) => false,
+            Err(_) => true,
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[allow(dead_code)]
+    fn windows_world_writable_flagged(&self) -> bool {
+        false
     }
 
     pub(crate) fn open_full_access_confirmation(&mut self, preset: ApprovalPreset) {
@@ -2440,6 +2480,92 @@ impl ChatWidget {
     }
 
     #[cfg(target_os = "windows")]
+    pub(crate) fn open_world_writable_warning_confirmation(
+        &mut self,
+        preset: Option<ApprovalPreset>,
+    ) {
+        let (approval, sandbox) = match &preset {
+            Some(preset) => (Some(preset.approval), Some(preset.sandbox.clone())),
+            None => (None, None),
+        };
+        let mut header_children: Vec<Box<dyn Renderable>> = Vec::new();
+        let title_line = Line::from("Auto mode has unprotected directories").bold();
+        let info_line = Line::from(vec![
+            "Some important directories on this system are world-writable. ".into(),
+            "The Windows sandbox cannot protect writes to these locations in Auto mode."
+                .fg(Color::Red),
+        ]);
+        header_children.push(Box::new(title_line));
+        header_children.push(Box::new(
+            Paragraph::new(vec![info_line]).wrap(Wrap { trim: false }),
+        ));
+        let header = ColumnRenderable::with(header_children);
+
+        let mut accept_actions: Vec<SelectionAction> = Vec::new();
+        accept_actions.push(Box::new(|tx| {
+            tx.send(AppEvent::SkipNextWorldWritableScan);
+        }));
+        if let (Some(approval), Some(sandbox)) = (approval, sandbox.clone()) {
+            accept_actions.extend(self.approval_preset_actions(approval, sandbox));
+        }
+
+        let mut accept_and_remember_actions: Vec<SelectionAction> = Vec::new();
+        accept_and_remember_actions.push(Box::new(|tx| {
+            tx.send(AppEvent::UpdateWorldWritableWarningAcknowledged(true));
+            tx.send(AppEvent::PersistWorldWritableWarningAcknowledged);
+        }));
+        if let (Some(approval), Some(sandbox)) = (approval, sandbox) {
+            accept_and_remember_actions.extend(self.approval_preset_actions(approval, sandbox));
+        }
+
+        let deny_actions: Vec<SelectionAction> = if preset.is_some() {
+            vec![Box::new(|tx| {
+                tx.send(AppEvent::OpenApprovalsPopup);
+            })]
+        } else {
+            Vec::new()
+        };
+
+        let items = vec![
+            SelectionItem {
+                name: "Continue".to_string(),
+                description: Some("Apply Auto mode for this session".to_string()),
+                actions: accept_actions,
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+            SelectionItem {
+                name: "Continue and don't warn again".to_string(),
+                description: Some("Enable Auto mode and remember this choice".to_string()),
+                actions: accept_and_remember_actions,
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+            SelectionItem {
+                name: "Cancel".to_string(),
+                description: Some("Go back without enabling Auto mode".to_string()),
+                actions: deny_actions,
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+        ];
+
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            header: Box::new(header),
+            ..Default::default()
+        });
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub(crate) fn open_world_writable_warning_confirmation(
+        &mut self,
+        _preset: Option<ApprovalPreset>,
+    ) {
+    }
+
+    #[cfg(target_os = "windows")]
     pub(crate) fn open_windows_auto_mode_instructions(&mut self) {
         use ratatui_macros::line;
 
@@ -2490,6 +2616,19 @@ impl ChatWidget {
         self.config.notices.hide_full_access_warning = Some(acknowledged);
     }
 
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(crate) fn set_world_writable_warning_acknowledged(&mut self, acknowledged: bool) {
+        self.config.notices.hide_world_writable_warning = Some(acknowledged);
+    }
+
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(crate) fn world_writable_warning_hidden(&self) -> bool {
+        self.config
+            .notices
+            .hide_world_writable_warning
+            .unwrap_or(false)
+    }
+
     /// Set the reasoning effort in the widget's config copy.
     pub(crate) fn set_reasoning_effort(&mut self, effort: Option<ReasoningEffortConfig>) {
         self.config.model_reasoning_effort = effort;
@@ -2513,6 +2652,10 @@ impl ChatWidget {
         providers: &std::collections::HashMap<String, ModelProviderInfo>,
     ) {
         self.config.model_providers = providers.clone();
+    }
+
+    pub(crate) fn sync_custom_providers(&mut self, providers: BTreeMap<String, CustomProvider>) {
+        self.custom_providers = providers;
     }
 
     pub(crate) fn set_index_status_line(&mut self, status: Option<String>) {

@@ -52,6 +52,7 @@ use codex_agentic_core::persist_default_model_selection;
 use codex_agentic_core::provider::DEFAULT_OLLAMA_ENDPOINT;
 use codex_agentic_core::provider::DEFAULT_OPENAI_PROVIDER_ID;
 use codex_agentic_core::provider::OSS_PROVIDER_ID;
+use codex_agentic_core::provider::custom_providers;
 use codex_agentic_core::provider::sanitize_reasoning_overrides;
 use codex_agentic_core::provider::sanitize_tool_overrides;
 use codex_agentic_core::serialize_agent_log_record;
@@ -702,6 +703,8 @@ pub(crate) struct App {
     pub(crate) backtrack: crate::app_backtrack::BacktrackState,
     pub(crate) feedback: codex_feedback::CodexFeedback,
     pub(crate) pending_update_action: Option<UpdateAction>,
+    // One-shot suppression of the next world-writable scan after user confirmation.
+    skip_world_writable_scan_once: bool,
     memory_runtime: Option<MemoryRuntime>,
 }
 
@@ -737,7 +740,7 @@ impl App {
 
         let enhanced_keys_supported = tui.enhanced_keys_supported();
 
-        let chat_widget = match resume_selection {
+        let mut chat_widget = match resume_selection {
             ResumeSelection::StartFresh | ResumeSelection::Exit => {
                 let init = crate::chatwidget::ChatWidgetInit {
                     config: config.clone(),
@@ -784,6 +787,7 @@ impl App {
         let index_worker = IndexWorker::new(cwd.clone(), app_event_tx.clone());
         let index_status = IndexStatusSnapshot::load(&cwd).ok().flatten();
         let settings = settings::global();
+        chat_widget.sync_custom_providers(custom_providers(&settings));
         #[cfg(not(debug_assertions))]
         let update_config = codex_agentic_core::updates::from_settings(&settings);
         let file_search = FileSearchManager::new(config.cwd.clone(), app_event_tx.clone());
@@ -858,8 +862,29 @@ impl App {
             backtrack: BacktrackState::default(),
             feedback,
             pending_update_action: None,
+            skip_world_writable_scan_once: false,
             memory_runtime,
         };
+
+        #[cfg(target_os = "windows")]
+        {
+            let should_check = codex_core::get_platform_sandbox().is_some()
+                && matches!(
+                    app.config.sandbox_policy,
+                    codex_core::protocol::SandboxPolicy::WorkspaceWrite { .. }
+                )
+                && !app
+                    .config
+                    .notices
+                    .hide_world_writable_warning
+                    .unwrap_or(false);
+            if should_check {
+                let cwd = app.config.cwd.clone();
+                let env_map: HashMap<String, String> = std::env::vars().collect();
+                let tx = app.app_event_tx.clone();
+                Self::spawn_world_writable_scan(cwd, env_map, tx, false);
+            }
+        }
 
         let initial_provider = app.config.model_provider_id.clone();
         if !app.apply_model_provider(&initial_provider)
@@ -1007,6 +1032,31 @@ impl App {
 
     fn index_manifest_exists(&self) -> bool {
         self.config.cwd.join(".codex/index/manifest.json").exists()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn spawn_world_writable_scan(
+        cwd: PathBuf,
+        env_map: HashMap<String, String>,
+        tx: AppEventSender,
+        apply_preset_on_continue: bool,
+    ) {
+        tokio::task::spawn_blocking(move || {
+            if codex_windows_sandbox::preflight_audit_everyone_writable(&cwd, &env_map).is_err() {
+                if apply_preset_on_continue {
+                    if let Some(preset) = codex_common::approval_presets::builtin_approval_presets()
+                        .into_iter()
+                        .find(|p| p.id == "auto")
+                    {
+                        tx.send(AppEvent::OpenWorldWritableWarningConfirmation {
+                            preset: Some(preset),
+                        });
+                    }
+                } else {
+                    tx.send(AppEvent::OpenWorldWritableWarningConfirmation { preset: None });
+                }
+            }
+        });
     }
 
     fn apply_model_provider(&mut self, provider_id: &str) -> bool {
@@ -1375,9 +1425,17 @@ impl App {
             AppEvent::OpenFullAccessConfirmation { preset } => {
                 self.chat_widget.open_full_access_confirmation(preset);
             }
+            AppEvent::OpenWorldWritableWarningConfirmation { preset } => {
+                self.chat_widget
+                    .open_world_writable_warning_confirmation(preset);
+            }
             AppEvent::UpdateFullAccessWarningAcknowledged(acknowledged) => {
                 self.chat_widget
                     .set_full_access_warning_acknowledged(acknowledged);
+            }
+            AppEvent::UpdateWorldWritableWarningAcknowledged(acknowledged) => {
+                self.chat_widget
+                    .set_world_writable_warning_acknowledged(acknowledged);
             }
             AppEvent::PersistFullAccessWarningAcknowledged => {
                 if let Err(err) = ConfigEditsBuilder::new(&self.config.codex_home)
@@ -1391,6 +1449,21 @@ impl App {
                     );
                     self.chat_widget.add_error_message(format!(
                         "Failed to save full access confirmation preference: {err}"
+                    ));
+                }
+            }
+            AppEvent::PersistWorldWritableWarningAcknowledged => {
+                if let Err(err) = ConfigEditsBuilder::new(&self.config.codex_home)
+                    .set_hide_world_writable_warning(true)
+                    .apply()
+                    .await
+                {
+                    tracing::error!(
+                        error = %err,
+                        "failed to persist world-writable warning acknowledgement"
+                    );
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to save Auto mode warning preference: {err}"
                     ));
                 }
             }
@@ -1507,6 +1580,8 @@ impl App {
                         ) {
                             Ok(updated) => {
                                 self.settings = updated;
+                                self.chat_widget
+                                    .sync_custom_providers(custom_providers(&self.settings));
                             }
                             Err(err) => {
                                 tracing::warn!(
@@ -1710,7 +1785,34 @@ impl App {
                 self.chat_widget.set_approval_policy(policy);
             }
             AppEvent::UpdateSandboxPolicy(policy) => {
+                #[cfg(target_os = "windows")]
+                let policy_is_workspace_write = matches!(
+                    policy,
+                    codex_core::protocol::SandboxPolicy::WorkspaceWrite { .. }
+                );
+
                 self.chat_widget.set_sandbox_policy(policy);
+
+                #[cfg(target_os = "windows")]
+                {
+                    if self.skip_world_writable_scan_once {
+                        self.skip_world_writable_scan_once = false;
+                        return Ok(true);
+                    }
+
+                    let should_check = codex_core::get_platform_sandbox().is_some()
+                        && policy_is_workspace_write
+                        && !self.chat_widget.world_writable_warning_hidden();
+                    if should_check {
+                        let cwd = self.config.cwd.clone();
+                        let env_map: HashMap<String, String> = std::env::vars().collect();
+                        let tx = self.app_event_tx.clone();
+                        Self::spawn_world_writable_scan(cwd, env_map, tx, false);
+                    }
+                }
+            }
+            AppEvent::SkipNextWorldWritableScan => {
+                self.skip_world_writable_scan_once = true;
             }
             AppEvent::OpenReviewBranchPicker(cwd) => {
                 self.chat_widget.show_review_branch_picker(&cwd).await;
@@ -1909,6 +2011,8 @@ impl App {
             match codex_agentic_core::persist_search_confidence_min(None) {
                 Ok(updated) => {
                     self.settings = updated;
+                    self.chat_widget
+                        .sync_custom_providers(custom_providers(&self.settings));
                     let percent = self.settings.search_confidence_min_percent();
                     self.chat_widget
                         .add_info_message(format!("Search confidence reset to {percent}%."), None);
@@ -1946,6 +2050,8 @@ impl App {
         match codex_agentic_core::persist_search_confidence_min(Some(normalized)) {
             Ok(updated) => {
                 self.settings = updated;
+                self.chat_widget
+                    .sync_custom_providers(custom_providers(&self.settings));
                 self.chat_widget
                     .add_info_message(format!("Search confidence set to {value:.0}%."), None);
                 self.open_search_manager();
@@ -4462,6 +4568,10 @@ impl App {
         codex_agentic_core::merge_custom_providers_into_config(&mut self.config, &self.settings);
         self.chat_widget
             .sync_model_providers(&self.config.model_providers);
+        self.chat_widget
+            .sync_custom_providers(custom_providers(&self.settings));
+        self.chat_widget
+            .sync_custom_providers(custom_providers(&self.settings));
         sanitize_reasoning_overrides(&mut self.config);
         sanitize_tool_overrides(&mut self.config);
 
@@ -4573,6 +4683,8 @@ impl App {
                         );
                         self.chat_widget
                             .sync_model_providers(&self.config.model_providers);
+                        self.chat_widget
+                            .sync_custom_providers(custom_providers(&self.settings));
                         self.chat_widget.add_info_message(
                             format!("Refreshed models for `{provider_id}`"),
                             None,
@@ -5076,6 +5188,7 @@ mod tests {
             backtrack: BacktrackState::default(),
             feedback: codex_feedback::CodexFeedback::new(),
             pending_update_action: None,
+            skip_world_writable_scan_once: false,
             memory_runtime: None,
         }
     }

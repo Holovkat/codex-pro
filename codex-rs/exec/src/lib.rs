@@ -597,25 +597,25 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
     }
     event_processor.print_final_output();
 
-    if let Some(ctx) = agent_context.as_mut() {
-        if let Some(record) = ctx.run.take() {
-            let exit_code = if error_seen { Some(1) } else { Some(0) };
-            if let Some(log_path) = ctx.log_path.as_ref() {
-                let status_line = if error_seen {
-                    exit_code
-                        .map(|code| format!("status: failed (exit {code})"))
-                        .unwrap_or_else(|| "status: failed".to_string())
-                } else {
-                    "status: completed".to_string()
-                };
-                log_agent_line(log_path, "info", &status_line);
-            }
-            if let Err(err) =
-                ctx.store
-                    .complete_run(&ctx.profile.slug, &record.run_id, exit_code, error_seen)
-            {
-                tracing::warn!(?err, "failed to finalize agent run {}", record.run_id);
-            }
+    if let Some(ctx) = agent_context.as_mut()
+        && let Some(record) = ctx.run.take()
+    {
+        let exit_code = if error_seen { Some(1) } else { Some(0) };
+        if let Some(log_path) = ctx.log_path.as_ref() {
+            let status_line = if error_seen {
+                exit_code
+                    .map(|code| format!("status: failed (exit {code})"))
+                    .unwrap_or_else(|| "status: failed".to_string())
+            } else {
+                "status: completed".to_string()
+            };
+            log_agent_line(log_path, "info", &status_line);
+        }
+        if let Err(err) =
+            ctx.store
+                .complete_run(&ctx.profile.slug, &record.run_id, exit_code, error_seen)
+        {
+            tracing::warn!(?err, "failed to finalize agent run {}", record.run_id);
         }
     }
 

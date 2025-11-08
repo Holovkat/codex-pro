@@ -38,7 +38,9 @@ pub struct ModelPreset {
 
 impl ModelPreset {
     pub fn provider_label(&self) -> &str {
-        self.provider_label.as_deref().unwrap_or(OPENAI_PROVIDER_LABEL)
+        self.provider_label
+            .as_deref()
+            .unwrap_or(OPENAI_PROVIDER_LABEL)
     }
 }
 
@@ -86,7 +88,7 @@ const PRESETS: &[StaticModelPreset] = &[
         id: "gpt-5-codex-mini",
         model: "gpt-5-codex-mini",
         display_name: "gpt-5-codex-mini",
-        description: "Optimized for codex. Cheaper, faster, and less capable.",
+        description: "Optimized for codex. Cheaper, faster, but less capable.",
         default_reasoning_effort: ReasoningEffort::Medium,
         supported_reasoning_efforts: &[
             StaticReasoningEffortPreset {

@@ -64,6 +64,7 @@ pub mod project_doc;
 mod rollout;
 pub(crate) mod safety;
 pub mod search;
+#[cfg(target_os = "macos")]
 pub mod seatbelt;
 pub mod shell;
 pub mod spawn;

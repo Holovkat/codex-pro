@@ -36,7 +36,7 @@ fn init_params() -> InitializeRequestParams {
         },
         client_info: Implementation {
             name: "codex-test".into(),
-            version: format!("{}-test", TEST_VERSION).into(),
+            version: format!("{TEST_VERSION}-test"),
             title: Some("Codex rmcp resource test".into()),
             user_agent: None,
         },

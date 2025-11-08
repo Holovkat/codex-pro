@@ -367,10 +367,12 @@ impl Renderable for RowRenderable<'_> {
 }
 
 impl<'a> RowRenderable<'a> {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self { children: vec![] }
     }
 
+    #[allow(dead_code)]
     pub fn push(&mut self, width: u16, child: impl Into<Box<dyn Renderable>>) {
         self.children
             .push((width, RenderableItem::Owned(child.into())));
