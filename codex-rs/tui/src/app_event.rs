@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use codex_agentic_core::AgentRunStatus;
 use codex_agentic_core::index::events::IndexEvent;
 use codex_agentic_core::index::query::QueryHit;
 use codex_common::approval_presets::ApprovalPreset;
@@ -31,6 +32,12 @@ pub(crate) struct CustomProviderForm {
     pub postprocess_reasoning: bool,
     pub anthropic_budget_tokens: Option<u32>,
     pub anthropic_budget_weight: Option<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AgentEditReturn {
+    AgentManager,
+    AgentActions { slug: String },
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -199,6 +206,90 @@ pub(crate) enum AppEvent {
     /// Launch the BYOK manager modal.
     OpenByokManager,
 
+    /// Launch the agent manager modal.
+    OpenAgentManager,
+
+    /// Show actions for a single agent profile.
+    ShowAgentActions {
+        slug: String,
+    },
+
+    /// Prompt for a user command before executing an agent.
+    PromptAgentExec {
+        slug: String,
+    },
+
+    /// Begin editing or creating an agent profile.
+    StartAgentEdit {
+        existing_slug: Option<String>,
+        return_to: AgentEditReturn,
+    },
+
+    /// Begin editing a field in the current agent draft.
+    BeginAgentFieldEdit {
+        field: AgentDraftField,
+    },
+
+    /// Cancel editing a draft field.
+    AgentFieldEditCancelled,
+
+    /// Apply a value to the selected agent draft field.
+    UpdateAgentDraftField {
+        field: AgentDraftField,
+        value: String,
+    },
+
+    /// Persist the current agent draft to disk.
+    SubmitAgentForm,
+
+    /// User attempted to cancel agent editing while unsaved changes exist.
+    AgentEditCancelRequested,
+
+    /// Confirm discarding current agent edits.
+    AgentEditDiscardConfirmed,
+
+    /// Continue editing the current agent.
+    AgentEditContinueEditing,
+
+    /// Delete an existing agent profile.
+    DeleteAgent {
+        slug: String,
+    },
+
+    /// Open the agent runs overlay.
+    ShowAgentRunsOverlay,
+
+    /// Overlay was closed via Esc or the Close action.
+    AgentRunsOverlayClosed,
+
+    /// Show actions for a specific agent run in the overlay.
+    ShowAgentRunActions {
+        run_id: String,
+    },
+
+    /// Toggle transcript expansion for a given run row.
+    ToggleAgentRunExpanded {
+        run_id: String,
+    },
+
+    /// Toggle pause/resume updates for a given run row.
+    ToggleAgentRunPaused {
+        run_id: String,
+    },
+
+    /// Remove all completed runs from the overlay list.
+    ClearCompletedAgentRuns,
+
+    /// Remove a single run (completed or cancelled) from the overlay list.
+    RemoveAgentRun {
+        run_id: String,
+    },
+
+    /// Insert a run transcript into the chat transcript for review.
+    ShowAgentRunTranscript {
+        run_id: String,
+    },
+
     /// Launch the memory manager overlay.
     OpenMemoryManager,
 
@@ -259,6 +350,31 @@ pub(crate) enum AppEvent {
         provider_id: String,
     },
 
+    /// Execute a configured agent from the TUI command palette.
+    ExecAgentCommand {
+        agent: String,
+        prompt: String,
+    },
+
+    /// Streaming output from a background agent run.
+    AgentRunOutput {
+        run_id: String,
+        agent_slug: String,
+        agent_name: String,
+        line: String,
+        is_error: bool,
+    },
+
+    /// Completion notification for a background agent run.
+    AgentRunCompleted {
+        run_id: String,
+        agent_slug: String,
+        agent_name: String,
+        exit_code: Option<i32>,
+        status: AgentRunStatus,
+        note: Option<String>,
+    },
+
     /// Show cached models for a provider.
     ShowByokProviderModels {
         provider_id: String,
@@ -294,4 +410,15 @@ pub(crate) enum ByokDraftField {
     ExtraHeaders,
     AnthropicBudgetTokens,
     AnthropicBudgetWeight,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum AgentDraftField {
+    Name,
+    Description,
+    PrimingPrompt,
+    DefaultCommand,
+    EnabledTools,
+    ApprovalMode,
+    SandboxMode,
 }

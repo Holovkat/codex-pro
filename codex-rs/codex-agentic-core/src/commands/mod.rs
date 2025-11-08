@@ -324,10 +324,10 @@ fn render_provider_models(
         .and_then(|provider| provider.base_url.clone())
     {
         header_line.push_str(&format!("\n  Endpoint: {url}"));
-    } else if provider_id == OSS_PROVIDER_ID {
-        if let Some(url) = provider::provider_endpoint(settings, provider_id) {
-            header_line.push_str(&format!("\n  Endpoint: {url}"));
-        }
+    } else if provider_id == OSS_PROVIDER_ID
+        && let Some(url) = provider::provider_endpoint(settings, provider_id)
+    {
+        header_line.push_str(&format!("\n  Endpoint: {url}"));
     }
     if let Some(refreshed) = last_refresh {
         header_line.push_str(&format!("\n  Last refresh: {refreshed}"));

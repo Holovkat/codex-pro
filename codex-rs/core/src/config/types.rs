@@ -19,17 +19,14 @@ pub const DEFAULT_OTEL_ENVIRONMENT: &str = "dev";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum ProviderKind {
+    #[default]
     OpenAiResponses,
     Ollama,
     AnthropicClaude,
 }
 
-impl Default for ProviderKind {
-    fn default() -> Self {
-        Self::OpenAiResponses
-    }
-}
 
 const fn default_postprocess_reasoning() -> bool {
     true

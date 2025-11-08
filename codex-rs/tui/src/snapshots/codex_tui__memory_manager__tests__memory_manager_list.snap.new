@@ -1,0 +1,35 @@
+---
+source: tui/src/memory_manager.rs
+assertion_line: 2118
+expression: screen
+---
+┌Memory Manager────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│[S]earch: type to filter…                                                    Runtime: off [e] enable   Select [m]ode: │
+│CF ≥  75% [+/-]                                                                                                       │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌Recent Memories───────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│[x][ ] 2025-01-02 19:30   91%  cli, docs  Summarise CLI install steps for offline docs                                │
+│[x][ ] 2025-01-01 23:00   82%  product, onboarding  Review onboarding flow for regression notes                       │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+[+/-] CF   [Space] toggle   [t] tool call   [A] select all   [N] new   [Enter] edit   [D] delete   [R] rebuild   [Shift+
+Memories: 2   Memory runtime disabled; enable it to resume ingestion

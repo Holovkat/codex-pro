@@ -1,0 +1,35 @@
+---
+source: tui/src/memory_manager.rs
+assertion_line: 2185
+expression: screen
+---
+┌Memory Manager────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│[┌Edit Memory · CF  91%─────────────────────────────────────────────────────────────────────────────────────────────┐ │
+│C│Summary  (editing)                                                                                                │ │
+└─│Summarise CLI install steps for offline docs▌                                                                     │─┘
+┌R│                                                                                                                  │─┐
+│[│                                                                                                                  │ │
+│[│                                                                                                                  │ │
+│ │                                                                                                                  │ │
+│ │                                                                                                                  │ │
+│ │                                                                                                                  │ │
+│ │                                                                                                                  │ │
+│ │                                                                                                                  │ │
+│ │                                                                                                                  │ │
+│ │                                                                                                                  │ │
+│ │                                                                                                                  │ │
+│ │                                                                                                                  │ │
+│ │                                                                                                                  │ │
+│ │                                                                                                                  │ │
+│ │                                                                                                                  │ │
+│ │                                                                                                                  │ │
+│ │                                                                                                                  │ │
+│ │                                                                                                                  │ │
+│ │                                                                                                                  │ │
+│ │                                                                                                                  │ │
+│ │                                                                                                                  │ │
+│ │Tags (comma separated)                                                                                            │ │
+│ │cli, docs                                                                                                         │ │
+└─│[Esc] done   [Tab] switch field   [Shift+Enter] newline                                                           │─┘
+[+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘t+
+Memories: 2   Memory runtime disabled; enable it to resume ingestion

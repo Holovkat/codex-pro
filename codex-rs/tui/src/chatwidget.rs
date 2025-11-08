@@ -287,6 +287,8 @@ pub(crate) struct ChatWidget {
     is_review_mode: bool,
     // Whether to add a final message separator after the last message
     needs_final_message_separator: bool,
+    // Context snippets queued to be injected into the next user turn.
+    pending_context_notes: VecDeque<String>,
 
     last_rendered_width: std::cell::Cell<Option<usize>>,
     // Feedback sink for /feedback
@@ -318,6 +320,8 @@ fn create_initial_user_message(text: String, image_paths: Vec<PathBuf>) -> Optio
 }
 
 impl ChatWidget {
+    const MAX_PENDING_CONTEXT_NOTES: usize = 8;
+
     fn flush_answer_stream_with_separator(&mut self) {
         if let Some(mut controller) = self.stream_controller.take()
             && let Some(cell) = controller.finalize()
@@ -1054,6 +1058,7 @@ impl ChatWidget {
             pending_notification: None,
             is_review_mode: false,
             needs_final_message_separator: false,
+            pending_context_notes: VecDeque::new(),
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
             current_rollout_path: None,
@@ -1120,6 +1125,7 @@ impl ChatWidget {
             pending_notification: None,
             is_review_mode: false,
             needs_final_message_separator: false,
+            pending_context_notes: VecDeque::new(),
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
             current_rollout_path: None,
@@ -1232,6 +1238,55 @@ impl ChatWidget {
         self.app_event_tx.send(AppEvent::MemorySuggestPrompt);
     }
 
+    fn handle_agent_command(&mut self, args: Option<String>) {
+        let Some(raw_args) = args.map(|value| value.trim().to_string()) else {
+            self.app_event_tx.send(AppEvent::OpenAgentManager);
+            return;
+        };
+
+        if raw_args.is_empty() {
+            self.app_event_tx.send(AppEvent::OpenAgentManager);
+            return;
+        }
+
+        let mut tokens = raw_args.split_whitespace();
+        let Some(subcommand) = tokens.next() else {
+            self.add_error_message("Usage: /agent exec <agent> <prompt>".to_string());
+            return;
+        };
+
+        if subcommand.eq_ignore_ascii_case("exec") {
+            let Some(agent_identifier) = tokens.next() else {
+                self.add_error_message("Usage: /agent exec <agent> <prompt>".to_string());
+                return;
+            };
+            let prompt = tokens.collect::<Vec<_>>().join(" ");
+            if prompt.trim().is_empty() {
+                self.add_error_message("Provide a prompt after the agent name.".to_string());
+                return;
+            }
+            self.app_event_tx.send(AppEvent::ExecAgentCommand {
+                agent: agent_identifier.to_string(),
+                prompt,
+            });
+            return;
+        }
+
+        if subcommand.eq_ignore_ascii_case("list") {
+            self.app_event_tx.send(AppEvent::OpenAgentManager);
+            return;
+        }
+
+        if subcommand.eq_ignore_ascii_case("runs") {
+            self.app_event_tx.send(AppEvent::ShowAgentRunsOverlay);
+            return;
+        }
+
+        self.add_error_message(format!(
+            "Unknown /agent subcommand `{subcommand}`. Try `/agent`, `/agent runs`, or `/agent exec <agent> <prompt>`."
+        ));
+    }
+
     pub(crate) fn attach_image(
         &mut self,
         path: PathBuf,
@@ -1301,6 +1356,9 @@ impl ChatWidget {
             }
             SlashCommand::MemorySuggest => {
                 self.handle_memory_suggest_command(args);
+            }
+            SlashCommand::Agent => {
+                self.handle_agent_command(args);
             }
             SlashCommand::Rollout => {
                 if let Some(path) = self.current_rollout_path.as_ref() {
@@ -1468,6 +1526,8 @@ impl ChatWidget {
             return;
         }
 
+        items.extend(self.drain_context_note_inputs());
+
         if !text.is_empty() {
             items.push(UserInput::Text { text: text.clone() });
         }
@@ -1496,6 +1556,41 @@ impl ChatWidget {
             self.add_to_history(history_cell::new_user_prompt(text));
         }
         self.needs_final_message_separator = false;
+    }
+
+    fn drain_context_note_inputs(&mut self) -> Vec<UserInput> {
+        if self.pending_context_notes.is_empty() {
+            return Vec::new();
+        }
+        self.pending_context_notes
+            .drain(..)
+            .filter_map(|note| {
+                let trimmed = note.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(UserInput::Text {
+                        text: format!("[background agent summary]\n{trimmed}"),
+                    })
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn queue_context_note(&mut self, note: String) {
+        let trimmed = note.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if self.pending_context_notes.len() >= Self::MAX_PENDING_CONTEXT_NOTES {
+            self.pending_context_notes.pop_front();
+        }
+        self.pending_context_notes.push_back(trimmed.to_string());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_context_notes_for_test(&self) -> Vec<String> {
+        self.pending_context_notes.iter().cloned().collect()
     }
 
     /// Replay a subset of initial events into the UI to seed the transcript when
@@ -2291,6 +2386,11 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    pub(crate) fn set_agent_status_line(&mut self, status: Option<String>) {
+        self.bottom_pane.set_agent_status_line(status);
+        self.request_redraw();
+    }
+
     pub(crate) fn push_bottom_view<F>(&mut self, f: F)
     where
         F: FnOnce(&mut BottomPane),
@@ -2301,6 +2401,11 @@ impl ChatWidget {
 
     pub(crate) fn show_selection_view(&mut self, params: SelectionViewParams) {
         self.bottom_pane.show_selection_view(params);
+        self.request_redraw();
+    }
+
+    pub(crate) fn pop_bottom_view(&mut self) {
+        self.bottom_pane.pop_view();
         self.request_redraw();
     }
 

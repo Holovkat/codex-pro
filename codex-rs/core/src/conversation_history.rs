@@ -602,15 +602,13 @@ mod tests {
     #[test]
     fn get_history_drops_reasoning_before_last_user_message() {
         let mut history = ConversationHistory::new();
-        let items = vec![
-            user_msg("initial"),
+        let items = [user_msg("initial"),
             reasoning("first"),
             assistant_msg("ack"),
             user_msg("latest"),
             reasoning("second"),
             assistant_msg("ack"),
-            reasoning("third"),
-        ];
+            reasoning("third")];
         history.record_items(items.iter());
 
         let filtered = history.get_history_for_prompt();

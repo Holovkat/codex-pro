@@ -437,7 +437,7 @@ impl GlobalMemoryStore {
             .into_iter()
             .chain(data_time)
             .min()
-            .map(|ts| chrono::DateTime::<Utc>::from(ts));
+            .map(chrono::DateTime::<Utc>::from);
         Ok(timestamp)
     }
 
@@ -446,7 +446,7 @@ impl GlobalMemoryStore {
             .and_then(|meta| meta.modified())
             .unwrap_or(SystemTime::UNIX_EPOCH);
         let index_time = Self::index_timestamp(graph_path, data_path)?
-            .map(|dt| dt.into())
+            .map(std::convert::Into::into)
             .unwrap_or(SystemTime::UNIX_EPOCH);
         Ok(manifest_time > index_time)
     }

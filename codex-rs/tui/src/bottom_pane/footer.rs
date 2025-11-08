@@ -19,6 +19,7 @@ pub(crate) struct FooterProps {
     pub(crate) is_task_running: bool,
     pub(crate) context_window_percent: Option<i64>,
     pub(crate) index_status: Option<String>,
+    pub(crate) agents_status: Option<String>,
     pub(crate) rate_limit_summaries: Vec<String>,
 }
 
@@ -100,6 +101,9 @@ fn footer_lines(props: FooterProps) -> Vec<Line<'static>> {
     };
     if let Some(status) = &props.index_status {
         lines.push(Line::from(status.clone()).dim());
+    }
+    if let Some(status) = &props.agents_status {
+        lines.push(Line::from(status.clone()).cyan());
     }
     lines
 }
@@ -418,6 +422,7 @@ mod tests {
                 is_task_running: false,
                 context_window_percent: None,
                 index_status: None,
+                agents_status: None,
                 rate_limit_summaries: vec![],
             },
         );
@@ -431,6 +436,7 @@ mod tests {
                 is_task_running: false,
                 context_window_percent: None,
                 index_status: None,
+                agents_status: None,
                 rate_limit_summaries: vec![],
             },
         );
@@ -444,6 +450,7 @@ mod tests {
                 is_task_running: false,
                 context_window_percent: None,
                 index_status: None,
+                agents_status: None,
                 rate_limit_summaries: vec![],
             },
         );
@@ -457,6 +464,7 @@ mod tests {
                 is_task_running: true,
                 context_window_percent: None,
                 index_status: None,
+                agents_status: None,
                 rate_limit_summaries: vec![],
             },
         );
@@ -470,6 +478,7 @@ mod tests {
                 is_task_running: false,
                 context_window_percent: None,
                 index_status: None,
+                agents_status: None,
                 rate_limit_summaries: vec![],
             },
         );
@@ -483,6 +492,7 @@ mod tests {
                 is_task_running: false,
                 context_window_percent: None,
                 index_status: None,
+                agents_status: None,
                 rate_limit_summaries: vec![],
             },
         );
@@ -496,6 +506,7 @@ mod tests {
                 is_task_running: true,
                 context_window_percent: Some(72),
                 index_status: None,
+                agents_status: None,
                 rate_limit_summaries: vec![],
             },
         );

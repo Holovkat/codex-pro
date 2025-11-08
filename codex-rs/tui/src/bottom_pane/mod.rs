@@ -201,18 +201,19 @@ impl BottomPane {
     pub fn handle_key_event(&mut self, key_event: KeyEvent) -> InputResult {
         // If a modal/view is active, handle it here; otherwise forward to composer.
         if let Some(view) = self.view_stack.last_mut() {
+            let mut handled_cancel = false;
             if key_event.code == KeyCode::Esc
                 && matches!(view.on_ctrl_c(), CancellationEvent::Handled)
-                && view.is_complete()
             {
-                self.view_stack.pop();
-                self.on_active_view_complete();
+                handled_cancel = true;
             } else {
                 view.handle_key_event(key_event);
-                if view.is_complete() {
-                    self.view_stack.clear();
-                    self.on_active_view_complete();
-                }
+            }
+            if view.is_complete() {
+                self.view_stack.pop();
+                self.on_active_view_complete();
+            } else if handled_cancel {
+                // View consumed Esc but decided to stay open.
             }
             self.request_redraw();
             InputResult::None
@@ -255,7 +256,6 @@ impl BottomPane {
         } else if self.composer_is_empty() {
             CancellationEvent::NotHandled
         } else {
-            self.view_stack.pop();
             self.clear_composer_for_ctrl_c();
             self.show_ctrl_c_quit_hint();
             CancellationEvent::Handled
@@ -412,6 +412,11 @@ impl BottomPane {
         self.request_redraw();
     }
 
+    pub(crate) fn set_agent_status_line(&mut self, status: Option<String>) {
+        self.composer.set_agent_status_line(status);
+        self.request_redraw();
+    }
+
     pub(crate) fn set_rate_limit_summaries(&mut self, summaries: Vec<String>) {
         self.composer.set_rate_limit_summaries(summaries);
         self.request_redraw();
@@ -475,7 +480,16 @@ impl BottomPane {
     }
 
     fn on_active_view_complete(&mut self) {
-        self.resume_status_timer_after_modal();
+        if self.view_stack.is_empty() {
+            self.resume_status_timer_after_modal();
+        }
+    }
+
+    pub fn pop_view(&mut self) {
+        if self.view_stack.pop().is_some() {
+            self.on_active_view_complete();
+            self.request_redraw();
+        }
     }
 
     fn pause_status_timer_for_modal(&mut self) {

@@ -51,6 +51,7 @@ pub(crate) struct SelectionViewParams {
     pub is_searchable: bool,
     pub search_placeholder: Option<String>,
     pub header: Box<dyn Renderable>,
+    pub cancel_handler: Option<Box<dyn Fn(&AppEventSender) -> bool + Send + Sync>>,
 }
 
 impl Default for SelectionViewParams {
@@ -63,6 +64,7 @@ impl Default for SelectionViewParams {
             is_searchable: false,
             search_placeholder: None,
             header: Box::new(()),
+            cancel_handler: None,
         }
     }
 }
@@ -79,6 +81,7 @@ pub(crate) struct ListSelectionView {
     filtered_indices: Vec<usize>,
     last_selected_actual_idx: Option<usize>,
     header: Box<dyn Renderable>,
+    cancel_handler: Option<Box<dyn Fn(&AppEventSender) -> bool + Send + Sync>>,
 }
 
 impl ListSelectionView {
@@ -109,6 +112,7 @@ impl ListSelectionView {
             filtered_indices: Vec::new(),
             last_selected_actual_idx: None,
             header,
+            cancel_handler: params.cancel_handler,
         };
         s.apply_filter();
         s
@@ -312,6 +316,11 @@ impl BottomPaneView for ListSelectionView {
     }
 
     fn on_ctrl_c(&mut self) -> CancellationEvent {
+        if let Some(handler) = &self.cancel_handler
+            && !(handler)(&self.app_event_tx)
+        {
+            return CancellationEvent::NotHandled;
+        }
         self.complete = true;
         CancellationEvent::Handled
     }

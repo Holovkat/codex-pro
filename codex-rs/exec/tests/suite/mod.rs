@@ -1,4 +1,5 @@
 // Aggregates all former standalone integration tests as modules.
+mod agent;
 mod apply_patch;
 mod auth_env;
 mod originator;

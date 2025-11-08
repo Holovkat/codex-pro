@@ -12,6 +12,7 @@ use ratatui::widgets::StatefulWidgetRef;
 use ratatui::widgets::Widget;
 use std::cell::RefCell;
 
+use crate::key_hint;
 use crate::render::renderable::Renderable;
 
 use super::popup_consts::standard_popup_hint_line;
@@ -23,6 +24,7 @@ use super::textarea::TextAreaState;
 
 /// Callback invoked when the user submits a custom prompt.
 pub(crate) type PromptSubmitted = Box<dyn Fn(String) + Send + Sync>;
+pub(crate) type PromptCancelled = Box<dyn Fn() + Send + Sync>;
 
 /// Minimal multi-line text input view to collect custom review instructions.
 pub(crate) struct CustomPromptView {
@@ -30,6 +32,8 @@ pub(crate) struct CustomPromptView {
     placeholder: String,
     context_label: Option<String>,
     on_submit: PromptSubmitted,
+    on_cancel: Option<PromptCancelled>,
+    full_height: bool,
 
     // UI state
     textarea: TextArea,
@@ -50,6 +54,8 @@ impl CustomPromptView {
             placeholder,
             context_label,
             on_submit,
+            on_cancel: None,
+            full_height: false,
             textarea: TextArea::new(),
             textarea_state: RefCell::new(TextAreaState::default()),
             complete: false,
@@ -59,6 +65,28 @@ impl CustomPromptView {
 
     pub(crate) fn with_allow_empty_submit(mut self, allow: bool) -> Self {
         self.allow_empty_submit = allow;
+        self
+    }
+
+    pub(crate) fn with_on_cancel(mut self, on_cancel: PromptCancelled) -> Self {
+        self.on_cancel = Some(on_cancel);
+        self
+    }
+
+    pub(crate) fn with_initial_text(mut self, value: String) -> Self {
+        if !value.is_empty() {
+            self.textarea.set_text(&value);
+            let len = self.textarea.text().len();
+            self.textarea.set_cursor(len);
+            if let Ok(mut state) = self.textarea_state.try_borrow_mut() {
+                *state = TextAreaState::default();
+            }
+        }
+        self
+    }
+
+    pub(crate) fn with_full_height(mut self, full_height: bool) -> Self {
+        self.full_height = full_height;
         self
     }
 }
@@ -72,21 +100,29 @@ impl BottomPaneView for CustomPromptView {
                 self.on_ctrl_c();
             }
             KeyEvent {
-                code: KeyCode::Enter,
-                modifiers: KeyModifiers::NONE,
+                code: KeyCode::Char('j' | 'J'),
+                modifiers,
                 ..
-            } => {
-                let text = self.textarea.text().trim().to_string();
-                if !text.is_empty() || self.allow_empty_submit {
-                    (self.on_submit)(text);
-                    self.complete = true;
-                }
+            } if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.textarea.insert_str("\n");
             }
             KeyEvent {
                 code: KeyCode::Enter,
+                modifiers,
                 ..
             } => {
-                self.textarea.input(key_event);
+                let should_submit = modifiers.is_empty()
+                    || modifiers.contains(KeyModifiers::CONTROL)
+                    || modifiers.contains(KeyModifiers::SUPER);
+                if should_submit {
+                    let text = self.textarea.text().trim().to_string();
+                    if !text.is_empty() || self.allow_empty_submit {
+                        (self.on_submit)(text);
+                        self.complete = true;
+                    }
+                } else {
+                    self.textarea.input(key_event);
+                }
             }
             other => {
                 self.textarea.input(other);
@@ -96,6 +132,9 @@ impl BottomPaneView for CustomPromptView {
 
     fn on_ctrl_c(&mut self) -> CancellationEvent {
         self.complete = true;
+        if let Some(callback) = self.on_cancel.as_ref() {
+            callback();
+        }
         CancellationEvent::Handled
     }
 
@@ -115,7 +154,9 @@ impl BottomPaneView for CustomPromptView {
         if area.height < 2 || area.width <= 2 {
             return None;
         }
-        let text_area_height = self.input_height(area.width).saturating_sub(1);
+        let text_area_height = self
+            .computed_input_height(area.width, area.height)
+            .saturating_sub(1);
         if text_area_height == 0 {
             return None;
         }
@@ -135,7 +176,12 @@ impl BottomPaneView for CustomPromptView {
 impl Renderable for CustomPromptView {
     fn desired_height(&self, width: u16) -> u16 {
         let extra_top: u16 = if self.context_label.is_some() { 1 } else { 0 };
-        1u16 + extra_top + self.input_height(width) + 3u16
+        let input_height = if self.full_height {
+            self.full_height_guess(width)
+        } else {
+            self.input_height(width)
+        };
+        1u16 + extra_top + input_height + 3u16
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
@@ -143,7 +189,7 @@ impl Renderable for CustomPromptView {
             return;
         }
 
-        let input_height = self.input_height(area.width);
+        let input_height = self.computed_input_height(area.width, area.height);
 
         // Title line
         let title_area = Rect {
@@ -228,7 +274,12 @@ impl Renderable for CustomPromptView {
 
         let hint_y = hint_blank_y.saturating_add(1);
         if hint_y < area.y.saturating_add(area.height) {
-            Paragraph::new(standard_popup_hint_line()).render(
+            let hint_line = if self.full_height {
+                multiline_hint_line()
+            } else {
+                standard_popup_hint_line()
+            };
+            Paragraph::new(hint_line).render(
                 Rect {
                     x: area.x,
                     y: hint_y,
@@ -247,8 +298,44 @@ impl CustomPromptView {
         let text_height = self.textarea.desired_height(usable_width).clamp(1, 8);
         text_height.saturating_add(1).min(9)
     }
+
+    fn computed_input_height(&self, width: u16, area_height: u16) -> u16 {
+        if self.full_height {
+            self.input_height_full(area_height)
+        } else {
+            self.input_height(width)
+        }
+    }
+
+    fn input_height_full(&self, area_height: u16) -> u16 {
+        let header = 1 + if self.context_label.is_some() { 1 } else { 0 };
+        let hint_rows = 2;
+        area_height
+            .saturating_sub(header + hint_rows)
+            .max(3)
+            .min(area_height)
+    }
+
+    fn full_height_guess(&self, width: u16) -> u16 {
+        let usable_width = width.saturating_sub(2);
+        self.textarea
+            .desired_height(usable_width)
+            .saturating_add(12)
+            .clamp(6, 60)
+    }
 }
 
 fn gutter() -> Span<'static> {
     "▌ ".cyan()
+}
+
+fn multiline_hint_line() -> Line<'static> {
+    Line::from(vec![
+        key_hint::plain(KeyCode::Enter).into(),
+        " saves · ".into(),
+        key_hint::ctrl(KeyCode::Char('J')).into(),
+        " adds newline · ".into(),
+        key_hint::plain(KeyCode::Esc).into(),
+        " cancels".into(),
+    ])
 }

@@ -196,6 +196,104 @@ fn entered_review_mode_uses_request_hint() {
     assert!(chat.is_review_mode);
 }
 
+#[test]
+fn agent_runs_subcommand_requests_overlay() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual();
+    chat.handle_agent_command(Some("runs".to_string()));
+    match rx.try_recv() {
+        Ok(AppEvent::ShowAgentRunsOverlay) => {}
+        other => panic!("expected ShowAgentRunsOverlay event, got {other:?}"),
+    }
+}
+
+#[test]
+fn queued_context_notes_are_injected_into_user_input() {
+    let (mut chat, _rx, mut ops) = make_chatwidget_manual();
+    chat.queue_context_note(
+        "Background agent `Dev` [abcd1234] completed successfully.".to_string(),
+    );
+
+    chat.submit_text_message("Next steps?".to_string());
+
+    let first_op = ops.try_recv().expect("user input op");
+    let items = match first_op {
+        Op::UserInput { items } => items,
+        other => panic!("expected Op::UserInput, got {other:?}"),
+    };
+    assert_eq!(items.len(), 2);
+    match &items[0] {
+        UserInput::Text { text } => assert!(
+            text.to_lowercase().contains("background agent"),
+            "context note missing label: {text}"
+        ),
+        other => panic!("expected context note text, got {other:?}"),
+    }
+    assert_eq!(
+        items[1],
+        UserInput::Text {
+            text: "Next steps?".to_string()
+        }
+    );
+
+    let history_op = ops.try_recv().expect("history op");
+    match history_op {
+        Op::AddToHistory { text } => assert_eq!(text, "Next steps?"),
+        other => panic!("expected AddToHistory, got {other:?}"),
+    }
+
+    chat.submit_text_message("Second turn".to_string());
+    let second_op = ops.try_recv().expect("second user input");
+    let items = match second_op {
+        Op::UserInput { items } => items,
+        other => panic!("expected Op::UserInput, got {other:?}"),
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        items[0],
+        UserInput::Text {
+            text: "Second turn".to_string()
+        }
+    );
+}
+
+#[test]
+fn context_notes_persist_past_shell_commands() {
+    let (mut chat, _rx, mut ops) = make_chatwidget_manual();
+    chat.queue_context_note("Background agent summary.".to_string());
+
+    chat.submit_text_message("!echo hi".to_string());
+    let cmd_op = ops.try_recv().expect("shell command op");
+    match cmd_op {
+        Op::RunUserShellCommand { command } => assert_eq!(command, "echo hi"),
+        other => panic!("expected RunUserShellCommand, got {other:?}"),
+    }
+    assert!(
+        ops.try_recv().is_err(),
+        "unexpected extra ops after shell command"
+    );
+
+    chat.submit_text_message("Status?".to_string());
+    let input_op = ops.try_recv().expect("user input after shell");
+    let items = match input_op {
+        Op::UserInput { items } => items,
+        other => panic!("expected Op::UserInput, got {other:?}"),
+    };
+    assert_eq!(items.len(), 2);
+    match &items[0] {
+        UserInput::Text { text } => assert!(
+            text.to_lowercase().contains("background agent"),
+            "context note missing label: {text}"
+        ),
+        other => panic!("expected context note text, got {other:?}"),
+    }
+    assert_eq!(
+        items[1],
+        UserInput::Text {
+            text: "Status?".to_string()
+        }
+    );
+}
+
 /// Entering review mode renders the current changes banner when requested.
 #[test]
 fn entered_review_mode_defaults_to_current_changes_banner() {
@@ -326,6 +424,7 @@ fn make_chatwidget_manual() -> (
         pending_notification: None,
         is_review_mode: false,
         needs_final_message_separator: false,
+        pending_context_notes: VecDeque::new(),
         last_rendered_width: std::cell::Cell::new(None),
         feedback: codex_feedback::CodexFeedback::new(),
         current_rollout_path: None,

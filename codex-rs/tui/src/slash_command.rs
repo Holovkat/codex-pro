@@ -17,6 +17,7 @@ pub enum SlashCommand {
     // DO NOT ALPHA-SORT! Enum order is presentation order in the popup, so
     // more frequently used commands should be listed first.
     Model,
+    Agent,
     #[strum(serialize = "byok", serialize = "BYOK")]
     Byok,
     Approvals,
@@ -58,6 +59,7 @@ impl SlashCommand {
             SlashCommand::Mention => "mention a file",
             SlashCommand::Status => "show current session configuration and token usage",
             SlashCommand::Model => "choose what model and reasoning effort to use",
+            SlashCommand::Agent => "manage `/agent`, `/agent exec`, and `/agent runs` workflows",
             SlashCommand::Byok => "manage custom model providers",
             SlashCommand::Approvals => "choose what Codex can do without approval",
             SlashCommand::Mcp => "list configured MCP tools",
@@ -94,6 +96,7 @@ impl SlashCommand {
             | SlashCommand::MemorySuggest
             | SlashCommand::Mention
             | SlashCommand::Status
+            | SlashCommand::Agent
             | SlashCommand::Mcp
             | SlashCommand::Feedback
             | SlashCommand::Rollout
@@ -107,7 +110,10 @@ impl SlashCommand {
     }
 
     pub fn accepts_args(self) -> bool {
-        matches!(self, SlashCommand::SearchCode | SlashCommand::MemorySuggest)
+        matches!(
+            self,
+            SlashCommand::SearchCode | SlashCommand::MemorySuggest | SlashCommand::Agent
+        )
     }
 }
 

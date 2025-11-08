@@ -199,14 +199,15 @@ mod tests {
                 .expect("load model"),
         );
         let embedder = Arc::new(OnceCell::new());
-        embedder
-            .set(Arc::new(Mutex::new(
-                TextEmbedding::try_new(
-                    TextInitOptions::default().with_cache_dir(root.path().join("fastembed-cache")),
-                )
-                .expect("init embedder"),
-            )))
-            .expect("set embedder");
+        let embedder_set = embedder.set(Arc::new(Mutex::new(
+            TextEmbedding::try_new(
+                TextInitOptions::default().with_cache_dir(root.path().join("fastembed-cache")),
+            )
+            .expect("init embedder"),
+        )));
+        if embedder_set.is_err() {
+            panic!("embedder already set");
+        }
         MemoryRuntime {
             store,
             settings,

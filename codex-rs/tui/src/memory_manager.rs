@@ -1928,11 +1928,13 @@ mod tests {
     use chrono::Utc;
     use codex_core::memory::MemorySettingsManager;
     use codex_core::memory::MiniCpmManager;
+    use codex_core::memory::distill::EmbedderSlot;
     use fastembed::TextEmbedding;
     use insta::assert_snapshot;
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::sync::Mutex;
+    use tokio::sync::OnceCell;
 
     async fn build_runtime(root: &TempDir) -> MemoryRuntime {
         let store = Arc::new(Mutex::new(
@@ -1950,9 +1952,12 @@ mod tests {
                 .await
                 .expect("load model"),
         );
-        let embedder = Arc::new(Mutex::new(
-            TextEmbedding::try_new(Default::default()).expect("init embedder"),
-        ));
+        let embedder: EmbedderSlot = Arc::new(OnceCell::new());
+        embedder
+            .set(Arc::new(Mutex::new(
+                TextEmbedding::try_new(Default::default()).expect("init embedder"),
+            )))
+            .ok();
         MemoryRuntime {
             store,
             settings,

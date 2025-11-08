@@ -71,6 +71,58 @@ pub struct Cli {
     #[arg(long = "output-last-message", short = 'o', value_name = "FILE")]
     pub last_message_file: Option<PathBuf>,
 
+    /// Load a named agent profile (managed via `/agent` in the TUI). Profiles
+    /// live under `~/.codex/agents/<slug>/profile.json`, and completed runs are
+    /// recorded under `instances/<run-id>/` for later inspection.
+    #[arg(long = "agent", value_name = "NAME")]
+    pub agent: Option<String>,
+
+    /// Read the initial prompt from a file.
+    #[arg(
+        long = "prompt-file",
+        value_name = "FILE",
+        conflicts_with_all = ["prompt_json"]
+    )]
+    pub prompt_file: Option<PathBuf>,
+
+    /// Read the initial prompt from a JSON file (validated before launch).
+    #[arg(
+        long = "prompt-json",
+        value_name = "FILE",
+        conflicts_with_all = ["prompt_file"]
+    )]
+    pub prompt_json: Option<PathBuf>,
+
+    /// Enable additional tools for this run.
+    #[arg(
+        long = "enable-tool",
+        value_name = "TOOL",
+        value_delimiter = ',',
+        num_args = 1..,
+        action = clap::ArgAction::Append
+    )]
+    pub enable_tools: Vec<String>,
+
+    /// Maximum run duration (seconds) before Codex aborts the session.
+    #[arg(long = "max-duration", value_name = "SECONDS")]
+    pub max_duration_secs: Option<u64>,
+
+    /// Maximum number of tool calls before Codex aborts the session.
+    #[arg(long = "max-tool-calls", value_name = "COUNT")]
+    pub max_tool_calls: Option<u32>,
+
+    /// Launch multiple identical runs in parallel for experimentation.
+    #[arg(long = "parallel", value_name = "COUNT", default_value_t = 1)]
+    pub parallel: u16,
+
+    /// Script to invoke once a run completes. Receives metadata via env vars.
+    #[arg(long = "on-complete", value_name = "SCRIPT")]
+    pub on_complete: Option<PathBuf>,
+
+    /// Do not wait for the run to complete; print the run id and exit.
+    #[arg(long = "no-wait", default_value_t = false)]
+    pub no_wait: bool,
+
     /// Initial instructions for the agent. If not provided as an argument (or
     /// if `-` is used), instructions are read from stdin.
     #[arg(value_name = "PROMPT", value_hint = clap::ValueHint::Other)]

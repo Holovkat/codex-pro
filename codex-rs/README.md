@@ -55,6 +55,16 @@ You can enable notifications by configuring a script that is run whenever the ag
 
 To run Codex non-interactively, run `codex exec PROMPT` (you can also pass the prompt via `stdin`) and Codex will work on your task until it decides that it is done and exits. Output is printed to the terminal directly. You can set the `RUST_LOG` environment variable to see more about what's going on.
 
+### Named agent profiles and `/agent exec`
+
+The TUI now ships with a dedicated `/agent` manager that lets you create, clone, edit, and delete named agent profiles. Each profile captures a persona name, description, priming prompt, default command line, tool availability, and approval/sandbox defaults; the data is stored under `~/.codex/agents/<slug>/`.
+
+- Run `/agent` to open the manager, `/agent exec <agent> <prompt>` to launch a background run from the TUI, and `/agent runs` to review active/background runs without leaving your current conversation. Long-running tasks stream status lines into the footer and retain JSONL logs under the corresponding `instances/<run-id>/` folder.
+- The automation-friendly CLI surface mirrors the same experience: `codex exec --agent <name> "<prompt>"` loads the stored defaults, merges any CLI overrides (`--enable-tool web_search_request`, `--model`, etc.), and records the run under the shared `.codex/agents/<slug>/instances/` tree.
+- Every CLI/TUI launch writes an auditable `run.json` plus `events.jsonl` under `instances/<run-id>/`, including the agent slug, resolved defaults, enabled tools, and whether dangerous flags (e.g., `--dangerously-bypass-approvals-and-sandbox`) were used.
+- While a run is active, the footer shows `Agents:` status badges (● running, × failed, etc.). Press `Ctrl+T` to open the background-run overlay, or `Ctrl+1`…`Ctrl+9` to dump the corresponding agent’s transcript into chat on demand.
+- Prompts can still be supplied via `--prompt-file path/to/file.txt` or `--prompt-json payload.json`, and dangerous automation scenarios can opt into `--dangerously-bypass-approvals-and-sandbox` (the flag is logged and marked as such in run metadata).
+
 ### Use `@` for file search
 
 Typing `@` triggers a fuzzy-filename search over the workspace root. Use up/down to select among the results and Tab or Enter to replace the `@` with the selected path. You can use Esc to cancel the search.

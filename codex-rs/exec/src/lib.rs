@@ -10,7 +10,12 @@ mod event_processor_with_human_output;
 pub mod event_processor_with_jsonl_output;
 pub mod exec_events;
 
+use anyhow::Context;
 pub use cli::Cli;
+use codex_agentic_core::AgentProfile;
+use codex_agentic_core::AgentRunContext;
+use codex_agentic_core::AgentRunRecord;
+use codex_agentic_core::AgentStore;
 use codex_agentic_core::apply_overlay_to_config;
 use codex_agentic_core::default_base_prompt;
 use codex_agentic_core::global_prompt;
@@ -20,6 +25,7 @@ use codex_agentic_core::load_settings;
 use codex_agentic_core::provider::DEFAULT_OPENAI_PROVIDER_ID;
 use codex_agentic_core::provider::ResolveModelProviderArgs;
 use codex_agentic_core::provider::custom_provider_model_info;
+use codex_agentic_core::serialize_agent_log_record;
 use codex_core::AuthManager;
 use codex_core::ConversationManager;
 use codex_core::NewConversation;
@@ -42,21 +48,36 @@ use event_processor_with_human_output::EventProcessorWithHumanOutput;
 use event_processor_with_jsonl_output::EventProcessorWithJsonOutput;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use serde_json::Value;
+use std::fs;
+use std::fs::OpenOptions;
 use std::io::IsTerminal;
 use std::io::Read;
+use std::io::Write;
+use std::path::Path;
 use std::path::PathBuf;
 use supports_color::Stream;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
+use tracing::warn;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
+use uuid::Uuid;
+
+const AGENT_PROMPT_PREVIEW_CHARS: usize = 160;
 
 use crate::cli::Command as ExecCommand;
 use crate::event_processor::CodexStatus;
 use crate::event_processor::EventProcessor;
 use codex_core::default_client::set_default_originator;
 use codex_core::find_conversation_path_by_id_str;
+
+struct AgentExecutionContext {
+    store: AgentStore,
+    profile: AgentProfile,
+    run: Option<AgentRunRecord>,
+    log_path: Option<PathBuf>,
+}
 
 pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()> {
     if let Err(err) = set_default_originator("codex_exec".to_string()) {
@@ -77,52 +98,127 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         last_message_file,
         json: json_mode,
         sandbox_mode: sandbox_mode_cli_arg,
+        agent,
+        prompt_file,
+        prompt_json,
+        mut enable_tools,
+        max_duration_secs,
+        max_tool_calls,
+        parallel,
+        on_complete,
+        no_wait,
         prompt,
         output_schema: output_schema_path,
         config_overrides,
     } = cli;
 
-    // Determine the prompt source (parent or subcommand) and read from stdin if needed.
+    if no_wait {
+        eprintln!("--no-wait is not supported yet in this build.");
+        std::process::exit(1);
+    }
+    if parallel != 1 {
+        eprintln!("--parallel currently supports only a value of 1.");
+        std::process::exit(1);
+    }
+    if max_duration_secs.is_some() {
+        eprintln!("--max-duration is not supported yet in this build.");
+        std::process::exit(1);
+    }
+    if max_tool_calls.is_some() {
+        eprintln!("--max-tool-calls is not supported yet in this build.");
+        std::process::exit(1);
+    }
+    if on_complete.is_some() {
+        eprintln!("--on-complete is not supported yet in this build.");
+        std::process::exit(1);
+    }
+
+    // Determine the prompt source (parent or subcommand) and read from stdin/file as needed.
     let prompt_arg = match &command {
-        // Allow prompt before the subcommand by falling back to the parent-level prompt
-        // when the Resume subcommand did not provide its own prompt.
         Some(ExecCommand::Resume(args)) => args.prompt.clone().or(prompt),
         None => prompt,
     };
 
-    let prompt = match prompt_arg {
-        Some(p) if p != "-" => p,
-        // Either `-` was passed or no positional arg.
-        maybe_dash => {
-            // When no arg (None) **and** stdin is a TTY, bail out early – unless the
-            // user explicitly forced reading via `-`.
-            let force_stdin = matches!(maybe_dash.as_deref(), Some("-"));
-
-            if std::io::stdin().is_terminal() && !force_stdin {
+    let mut prompt = if let Some(path) = prompt_file {
+        match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) => {
+                eprintln!("Failed to read prompt file {}: {error}", path.display());
+                std::process::exit(1);
+            }
+        }
+    } else if let Some(path) = prompt_json {
+        match fs::read_to_string(&path) {
+            Ok(raw) => {
+                if let Err(error) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    eprintln!("Invalid JSON prompt in {}: {error}", path.display());
+                    std::process::exit(1);
+                }
+                raw
+            }
+            Err(error) => {
                 eprintln!(
-                    "No prompt provided. Either specify one as an argument or pipe the prompt into stdin."
+                    "Failed to read JSON prompt file {}: {error}",
+                    path.display()
                 );
                 std::process::exit(1);
             }
+        }
+    } else {
+        match prompt_arg {
+            Some(p) if p != "-" => p,
+            maybe_dash => {
+                let force_stdin = matches!(maybe_dash.as_deref(), Some("-"));
 
-            // Ensure the user knows we are waiting on stdin, as they may
-            // have gotten into this state by mistake. If so, and they are not
-            // writing to stdin, Codex will hang indefinitely, so this should
-            // help them debug in that case.
-            if !force_stdin {
-                eprintln!("Reading prompt from stdin...");
+                if std::io::stdin().is_terminal() && !force_stdin {
+                    eprintln!(
+                        "No prompt provided. Either specify one as an argument or pipe the prompt into stdin."
+                    );
+                    std::process::exit(1);
+                }
+
+                if !force_stdin {
+                    eprintln!("Reading prompt from stdin...");
+                }
+                let mut buffer = String::new();
+                if let Err(e) = std::io::stdin().read_to_string(&mut buffer) {
+                    eprintln!("Failed to read prompt from stdin: {e}");
+                    std::process::exit(1);
+                } else if buffer.trim().is_empty() {
+                    eprintln!("No prompt provided via stdin.");
+                    std::process::exit(1);
+                }
+                buffer
             }
-            let mut buffer = String::new();
-            if let Err(e) = std::io::stdin().read_to_string(&mut buffer) {
-                eprintln!("Failed to read prompt from stdin: {e}");
-                std::process::exit(1);
-            } else if buffer.trim().is_empty() {
-                eprintln!("No prompt provided via stdin.");
-                std::process::exit(1);
-            }
-            buffer
         }
     };
+
+    let mut agent_context: Option<AgentExecutionContext> = None;
+    if let Some(agent_selector) = agent {
+        let store = AgentStore::new().context("failed to open agents directory")?;
+        let profile = store
+            .load_profile_by_selector(&agent_selector)
+            .with_context(|| format!("failed to load agent profile '{agent_selector}'"))?;
+        if !profile.priming_prompt().is_empty() {
+            let priming = profile.priming_prompt();
+            if !priming.trim().is_empty() {
+                prompt = format!("{priming}\n\n{prompt}");
+            }
+        }
+
+        for tool in &profile.enabled_tools {
+            if !enable_tools.iter().any(|existing| existing == tool) {
+                enable_tools.push(tool.clone());
+            }
+        }
+
+        agent_context = Some(AgentExecutionContext {
+            store,
+            profile,
+            run: None,
+            log_path: None,
+        });
+    }
 
     let output_schema = load_output_schema(output_schema_path);
 
@@ -194,6 +290,10 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         experimental_sandbox_command_assessment: None,
         additional_writable_roots: Vec::new(),
     };
+
+    if enable_tools.iter().any(|tool| tool == "web_search_request") {
+        overrides.tools_web_search_request = Some(true);
+    }
 
     if custom_provider_selected.is_none() && resolution.provider_override.is_none() {
         overrides.model_provider = Some(DEFAULT_OPENAI_PROVIDER_ID.to_string());
@@ -375,11 +475,93 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
     }
 
     // Package images and prompt into a single user input turn.
+    let prompt_for_metadata = prompt.clone();
     let mut items: Vec<UserInput> = images
         .into_iter()
         .map(|path| UserInput::LocalImage { path })
         .collect();
     items.push(UserInput::Text { text: prompt });
+
+    if let Some(ctx) = agent_context.as_mut() {
+        let run_id = Uuid::new_v4().to_string();
+        let mut run_context: AgentRunContext = (&ctx.profile).into();
+        run_context.enabled_tools = enable_tools.clone();
+        if dangerously_bypass_approvals_and_sandbox {
+            run_context
+                .dangerous_flags
+                .push("dangerously_bypass_approvals_and_sandbox".to_string());
+        }
+        let mut record = ctx
+            .store
+            .begin_run(
+                &ctx.profile.slug,
+                &run_id,
+                Some(prompt_for_metadata.clone()),
+                Some(run_context),
+            )
+            .with_context(|| format!("failed to register run for agent '{}'", ctx.profile.name))?;
+        if !enable_tools.is_empty() {
+            record.summary = Some(format!("tools: {}", enable_tools.join(",")));
+        }
+        let log_path = ctx
+            .store
+            .instance_dir(&ctx.profile.slug, &run_id)
+            .join("events.jsonl");
+        record.log_path = Some(log_path.clone());
+        if let Err(err) = ctx
+            .store
+            .write_run_record(&ctx.profile.slug, &record.run_id, &record)
+        {
+            warn!(?err, "failed to update agent run record with log path");
+        }
+        eprintln!(
+            "Launching agent '{}' (run-id: {}).",
+            ctx.profile.name, record.run_id
+        );
+        let prompt_preview = agent_prompt_preview(&prompt_for_metadata);
+        log_agent_line(
+            &log_path,
+            "info",
+            &format!("agent: {} ({})", ctx.profile.name, ctx.profile.slug),
+        );
+        if !ctx.profile.default_command.is_empty() {
+            log_agent_line(
+                &log_path,
+                "info",
+                &format!(
+                    "defaults.command: {}",
+                    ctx.profile.default_command.join(" ")
+                ),
+            );
+        }
+        if !ctx.profile.enabled_tools.is_empty() {
+            log_agent_line(
+                &log_path,
+                "info",
+                &format!("defaults.tools: {}", ctx.profile.enabled_tools.join(", ")),
+            );
+        }
+        if !enable_tools.is_empty() {
+            log_agent_line(
+                &log_path,
+                "info",
+                &format!("cli.tools: {}", enable_tools.join(", ")),
+            );
+        }
+        if dangerously_bypass_approvals_and_sandbox {
+            log_agent_line(
+                &log_path,
+                "info",
+                "dangerous_flags: dangerously_bypass_approvals_and_sandbox",
+            );
+        }
+        if !prompt_preview.is_empty() {
+            log_agent_line(&log_path, "info", &format!("prompt: {prompt_preview}"));
+        }
+        ctx.log_path = Some(log_path);
+        ctx.run = Some(record);
+    }
+
     let initial_prompt_task_id = conversation
         .submit(Op::UserTurn {
             items,
@@ -414,6 +596,29 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         }
     }
     event_processor.print_final_output();
+
+    if let Some(ctx) = agent_context.as_mut() {
+        if let Some(record) = ctx.run.take() {
+            let exit_code = if error_seen { Some(1) } else { Some(0) };
+            if let Some(log_path) = ctx.log_path.as_ref() {
+                let status_line = if error_seen {
+                    exit_code
+                        .map(|code| format!("status: failed (exit {code})"))
+                        .unwrap_or_else(|| "status: failed".to_string())
+                } else {
+                    "status: completed".to_string()
+                };
+                log_agent_line(log_path, "info", &status_line);
+            }
+            if let Err(err) =
+                ctx.store
+                    .complete_run(&ctx.profile.slug, &record.run_id, exit_code, error_seen)
+            {
+                tracing::warn!(?err, "failed to finalize agent run {}", record.run_id);
+            }
+        }
+    }
+
     if error_seen {
         std::process::exit(1);
     }
@@ -435,6 +640,38 @@ fn refresh_model_metadata(config: &mut Config) {
         config.model_max_output_tokens = None;
         config.model_auto_compact_token_limit = None;
     }
+}
+
+fn agent_prompt_preview(prompt: &str) -> String {
+    let mut normalized = prompt.replace(['\n', '\r'], " ");
+    if normalized.len() > AGENT_PROMPT_PREVIEW_CHARS {
+        normalized.truncate(AGENT_PROMPT_PREVIEW_CHARS);
+        normalized.push('…');
+    }
+    normalized
+}
+
+fn log_agent_line(path: &Path, stream: &str, line: &str) {
+    if let Err(err) = write_agent_log_line(path, stream, line) {
+        warn!(?err, "failed to append agent log line");
+    }
+}
+
+fn write_agent_log_line(path: &Path, stream: &str, line: &str) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!("failed to create agent log directory {}", parent.display())
+        })?;
+    }
+    let serialized = serialize_agent_log_record(stream, line)?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("failed to open agent log {}", path.display()))?;
+    file.write_all(serialized.as_bytes())?;
+    file.write_all(b"\n")?;
+    Ok(())
 }
 
 async fn resolve_resume_path(

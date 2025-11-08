@@ -1,13 +1,17 @@
 use crate::UpdateAction;
 use crate::app_backtrack::BacktrackState;
+use crate::app_event::AgentDraftField;
+use crate::app_event::AgentEditReturn;
 use crate::app_event::AppEvent;
 use crate::app_event::ByokDraftField;
 use crate::app_event::CustomProviderForm;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::ApprovalRequest;
+use crate::bottom_pane::SelectionAction;
 use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
 use crate::bottom_pane::custom_prompt_view::CustomPromptView;
+use crate::bottom_pane::custom_prompt_view::PromptCancelled;
 use crate::bottom_pane::custom_prompt_view::PromptSubmitted;
 use crate::chatwidget::ChatWidget;
 use crate::chatwidget::refresh_model_metadata;
@@ -32,6 +36,10 @@ use crate::tui::TuiEvent;
 use anyhow::Error as AnyError;
 use chrono::DateTime;
 use chrono::Utc;
+use codex_agentic_core::AgentProfile;
+use codex_agentic_core::AgentRunContext;
+use codex_agentic_core::AgentRunStatus;
+use codex_agentic_core::AgentStore;
 use codex_agentic_core::CustomProvider;
 use codex_agentic_core::DEFAULT_SEARCH_CONFIDENCE_MIN;
 use codex_agentic_core::fetch_custom_provider_models;
@@ -45,8 +53,10 @@ use codex_agentic_core::provider::DEFAULT_OPENAI_PROVIDER_ID;
 use codex_agentic_core::provider::OSS_PROVIDER_ID;
 use codex_agentic_core::provider::sanitize_reasoning_overrides;
 use codex_agentic_core::provider::sanitize_tool_overrides;
+use codex_agentic_core::serialize_agent_log_record;
 use codex_agentic_core::settings;
 use codex_agentic_core::settings::Settings;
+use codex_agentic_core::slug_for_name;
 use codex_ansi_escape::ansi_escape_line;
 use codex_core::AuthManager;
 use codex_core::ConversationManager;
@@ -70,20 +80,36 @@ use color_eyre::eyre::eyre;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
+use crossterm::event::KeyModifiers;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use std::collections::BTreeMap;
+use std::collections::HashSet;
+use std::collections::VecDeque;
+use std::env;
+use std::ffi::OsString;
+use std::path::Path;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncBufReadExt;
+use tokio::io::AsyncRead;
+use tokio::io::AsyncWriteExt;
+use tokio::io::BufReader;
+use tokio::process::Command;
 use tokio::select;
+use tokio::sync::Mutex;
 use tokio::sync::mpsc::unbounded_channel;
+use tokio::task;
 use tokio::time;
 use tracing::warn;
+use uuid::Uuid;
 
 const INDEX_STATUS_REFRESH_SECS: u64 = 60;
 const INDEX_TOAST_DURATION_SECS: u64 = 5;
@@ -91,6 +117,8 @@ const INDEX_TOAST_TICK_SECS: u64 = 1;
 const INDEX_DELTA_POLL_SECS: u64 = 300;
 const PROGRESS_BAR_WIDTH: usize = 20;
 const SEARCH_CODE_TOP_K: usize = 12;
+const AGENT_RUN_LOG_LIMIT: usize = 200;
+const AGENT_PROMPT_PREVIEW_CHARS: usize = 160;
 
 #[derive(Debug, Clone)]
 pub struct AppExitInfo {
@@ -313,6 +341,233 @@ fn provider_kind_label(kind: ProviderKind) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone)]
+struct AgentDraft {
+    original_slug: Option<String>,
+    name: String,
+    description: String,
+    priming_prompt: String,
+    default_command: String,
+    enabled_tools: String,
+    approval_mode: Option<String>,
+    sandbox_mode: Option<String>,
+}
+
+impl AgentDraft {
+    fn new() -> Self {
+        Self {
+            original_slug: None,
+            name: String::new(),
+            description: String::new(),
+            priming_prompt: String::new(),
+            default_command: String::new(),
+            enabled_tools: String::new(),
+            approval_mode: None,
+            sandbox_mode: None,
+        }
+    }
+
+    fn from_profile(profile: &AgentProfile) -> Self {
+        Self {
+            original_slug: Some(profile.slug.clone()),
+            name: profile.name.clone(),
+            description: profile.description.clone().unwrap_or_default(),
+            priming_prompt: profile.priming_prompt.clone().unwrap_or_default(),
+            default_command: if profile.default_command.is_empty() {
+                String::new()
+            } else {
+                profile.default_command.join(" ")
+            },
+            enabled_tools: if profile.enabled_tools.is_empty() {
+                String::new()
+            } else {
+                profile.enabled_tools.join(" ")
+            },
+            approval_mode: profile.approval_mode.clone(),
+            sandbox_mode: profile.sandbox_mode.clone(),
+        }
+    }
+
+    fn apply_field(&mut self, field: AgentDraftField, value: String) {
+        let trimmed = value.trim().to_string();
+        match field {
+            AgentDraftField::Name => {
+                self.name = trimmed;
+            }
+            AgentDraftField::Description => {
+                self.description = trimmed;
+            }
+            AgentDraftField::PrimingPrompt => {
+                self.priming_prompt = trimmed;
+            }
+            AgentDraftField::DefaultCommand => {
+                self.default_command = trimmed;
+            }
+            AgentDraftField::EnabledTools => {
+                self.enabled_tools = trimmed;
+            }
+            AgentDraftField::ApprovalMode => {
+                self.approval_mode = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                };
+            }
+            AgentDraftField::SandboxMode => {
+                self.sandbox_mode = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                };
+            }
+        }
+    }
+
+    fn into_profile(self) -> Result<AgentProfile, String> {
+        let mut profile = AgentProfile::default();
+        profile.name = self.name.trim().to_string();
+        if profile.name.is_empty() {
+            return Err("Agent name cannot be empty.".to_string());
+        }
+        profile.slug = self
+            .original_slug
+            .clone()
+            .unwrap_or_else(|| slug_for_name(&profile.name));
+        profile.description = if self.description.trim().is_empty() {
+            None
+        } else {
+            Some(self.description.trim().to_string())
+        };
+        profile.priming_prompt = if self.priming_prompt.trim().is_empty() {
+            None
+        } else {
+            Some(self.priming_prompt)
+        };
+        if !self.default_command.trim().is_empty() {
+            let tokens: Vec<String> = self
+                .default_command
+                .split_whitespace()
+                .map(std::string::ToString::to_string)
+                .collect();
+            if tokens.is_empty() {
+                return Err("Default command must not be empty.".to_string());
+            }
+            profile.default_command = tokens;
+        }
+        if !self.enabled_tools.trim().is_empty() {
+            let mut seen = std::collections::HashSet::new();
+            let mut tools = Vec::new();
+            for token in self
+                .enabled_tools
+                .split(|c: char| c.is_ascii_whitespace() || c == ',')
+            {
+                let trimmed = token.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let key = trimmed.to_ascii_lowercase();
+                if seen.insert(key) {
+                    tools.push(trimmed.to_string());
+                }
+            }
+            profile.enabled_tools = tools;
+        }
+        profile.approval_mode = self.approval_mode.filter(|value| !value.trim().is_empty());
+        profile.sandbox_mode = self.sandbox_mode.filter(|value| !value.trim().is_empty());
+        Ok(profile)
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct ActiveAgentRun {
+    run_id: String,
+    agent_slug: String,
+    agent_name: String,
+    started_at: DateTime<Utc>,
+    status: AgentRunStatus,
+    exit_code: Option<i32>,
+    last_note: Option<String>,
+    prompt_preview: String,
+    command_line: Vec<String>,
+    log_path: PathBuf,
+    logs: VecDeque<AgentRunLogEntry>,
+    paused: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct AgentRunLogEntry {
+    stream: AgentRunLogStream,
+    message: String,
+    timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentRunLogStream {
+    Info,
+    Stdout,
+    Stderr,
+}
+
+#[allow(dead_code)]
+impl ActiveAgentRun {
+    fn new(
+        run_id: String,
+        agent_slug: String,
+        agent_name: String,
+        prompt_preview: String,
+        command_line: Vec<String>,
+        log_path: PathBuf,
+    ) -> Self {
+        Self {
+            run_id,
+            agent_slug,
+            agent_name,
+            started_at: Utc::now(),
+            status: AgentRunStatus::Running,
+            exit_code: None,
+            last_note: None,
+            prompt_preview,
+            command_line,
+            log_path,
+            logs: VecDeque::new(),
+            paused: false,
+        }
+    }
+
+    fn push_log(&mut self, entry: AgentRunLogEntry) {
+        if self.logs.len() >= AGENT_RUN_LOG_LIMIT {
+            self.logs.pop_front();
+        }
+        self.logs.push_back(entry);
+    }
+
+    fn mark_status(
+        &mut self,
+        status: AgentRunStatus,
+        exit_code: Option<i32>,
+        note: Option<String>,
+    ) {
+        self.status = status.clone();
+        self.exit_code = exit_code;
+        if let Some(note) = note
+            && !note.trim().is_empty()
+        {
+            self.last_note = Some(note);
+            return;
+        }
+        if self.last_note.is_none() {
+            self.last_note = match status {
+                AgentRunStatus::Completed => Some("completed".to_string()),
+                AgentRunStatus::Failed => Some("failed".to_string()),
+                AgentRunStatus::Cancelled => Some("cancelled".to_string()),
+                AgentRunStatus::Running => None,
+            };
+        }
+    }
+}
+
 fn slugify_provider_id(name: &str) -> String {
     let mut slug = String::new();
     let mut last_dash = false;
@@ -411,6 +666,16 @@ pub(crate) struct App {
     pub(crate) active_profile: Option<String>,
     settings: Settings,
     byok_draft: Option<ByokDraft>,
+    agent_store: Option<AgentStore>,
+    agent_profiles: Vec<AgentProfile>,
+    agent_draft: Option<AgentDraft>,
+    agent_draft_dirty: bool,
+    agent_edit_dirty_flag: Option<Arc<AtomicBool>>,
+    agent_edit_return: AgentEditReturn,
+    active_agent_runs: Vec<ActiveAgentRun>,
+    agent_status_line: Option<String>,
+    agent_runs_overlay_open: bool,
+    expanded_agent_runs: HashSet<String>,
 
     pub(crate) file_search: FileSearchManager,
     index_worker: IndexWorker,
@@ -538,6 +803,25 @@ impl App {
             }
         };
 
+        let agent_store = match AgentStore::new() {
+            Ok(store) => Some(store),
+            Err(err) => {
+                warn!(%err, "failed to initialize agent store");
+                None
+            }
+        };
+        let agent_profiles = match agent_store
+            .as_ref()
+            .map(codex_agentic_core::AgentStore::list_profiles)
+        {
+            Some(Ok(list)) => list,
+            Some(Err(err)) => {
+                warn!(%err, "failed to list agent profiles");
+                Vec::new()
+            }
+            None => Vec::new(),
+        };
+
         let mut app = Self {
             server: conversation_manager,
             app_event_tx,
@@ -547,6 +831,16 @@ impl App {
             active_profile,
             settings,
             byok_draft: None,
+            agent_store,
+            agent_profiles,
+            agent_draft: None,
+            agent_draft_dirty: false,
+            agent_edit_dirty_flag: None,
+            agent_edit_return: AgentEditReturn::AgentManager,
+            active_agent_runs: Vec::new(),
+            agent_status_line: None,
+            agent_runs_overlay_open: false,
+            expanded_agent_runs: HashSet::new(),
             file_search,
             index_worker,
             index_status,
@@ -567,10 +861,10 @@ impl App {
         };
 
         let initial_provider = app.config.model_provider_id.clone();
-        if !app.apply_model_provider(&initial_provider) {
-            if initial_provider != DEFAULT_OPENAI_PROVIDER_ID {
-                let _ = app.apply_model_provider(DEFAULT_OPENAI_PROVIDER_ID);
-            }
+        if !app.apply_model_provider(&initial_provider)
+            && initial_provider != DEFAULT_OPENAI_PROVIDER_ID
+        {
+            let _ = app.apply_model_provider(DEFAULT_OPENAI_PROVIDER_ID);
         }
 
         tracing::info!(
@@ -585,6 +879,7 @@ impl App {
         }
 
         app.refresh_index_status_line();
+        app.refresh_agent_status_line();
 
         spawn_status_refresh(app.app_event_tx.clone());
         spawn_toast_tick(app.app_event_tx.clone());
@@ -662,20 +957,66 @@ impl App {
         self.chat_widget.set_index_status_line(line);
     }
 
+    fn refresh_agent_status_line(&mut self) {
+        if self.active_agent_runs.is_empty() {
+            self.agent_status_line = None;
+        } else {
+            let mut parts: Vec<String> = Vec::new();
+            for run in &self.active_agent_runs {
+                let indicator = match run.status {
+                    AgentRunStatus::Running => "●",
+                    AgentRunStatus::Completed => "○",
+                    AgentRunStatus::Failed => "×",
+                    AgentRunStatus::Cancelled => "◌",
+                };
+                let mut label = format!(
+                    "{} `{}` [{}]",
+                    indicator,
+                    run.agent_name,
+                    short_run_id(&run.run_id)
+                );
+                if run.paused {
+                    label.push_str(" · paused");
+                }
+                if let Some(code) = run.exit_code
+                    && !matches!(run.status, AgentRunStatus::Running)
+                {
+                    label.push_str(&format!(" · exit {code}"));
+                }
+                if let Some(note) = &run.last_note
+                    && !note.trim().is_empty()
+                {
+                    let clipped = Self::truncate_line(note);
+                    if !clipped.is_empty() {
+                        label.push_str(" · ");
+                        label.push_str(&clipped);
+                    }
+                }
+                parts.push(label);
+            }
+            let summary = format!(
+                "Agents: {}  (Ctrl+T overlay · Ctrl+1-9 transcript)",
+                parts.join("  ")
+            );
+            self.agent_status_line = Some(summary);
+        }
+        self.chat_widget
+            .set_agent_status_line(self.agent_status_line.clone());
+    }
+
     fn index_manifest_exists(&self) -> bool {
         self.config.cwd.join(".codex/index/manifest.json").exists()
     }
 
     fn apply_model_provider(&mut self, provider_id: &str) -> bool {
-        if let Some(custom) = self.settings.custom_provider(provider_id) {
-            if Self::custom_provider_requires_api_key(custom)
-                && !self.custom_provider_has_api_key(provider_id)
-            {
-                self.chat_widget.add_error_message(format!(
+        if let Some(custom) = self.settings.custom_provider(provider_id)
+            && Self::custom_provider_requires_api_key(custom)
+            && !self.custom_provider_has_api_key(provider_id)
+        {
+            self.chat_widget.add_error_message(format!(
                     "Provider `{provider_id}` is missing credentials. Run /byok and add an API key to use this model."
                 ));
-                return false;
-            }
+            return false;
         }
 
         if self.config.model_provider_id == provider_id {
@@ -702,7 +1043,7 @@ impl App {
 
     fn custom_provider_requires_api_key(custom: &CustomProvider) -> bool {
         custom.provider_kind != ProviderKind::Ollama
-            && !custom.extra_headers.as_ref().map_or(false, |headers| {
+            && !custom.extra_headers.as_ref().is_some_and(|headers| {
                 headers
                     .keys()
                     .any(|key| key.eq_ignore_ascii_case("authorization"))
@@ -1193,8 +1534,105 @@ impl App {
                     }
                 }
             }
+            AppEvent::OpenAgentManager => {
+                self.open_agent_manager();
+            }
+            AppEvent::ShowAgentActions { slug } => {
+                self.show_agent_actions(slug);
+            }
+            AppEvent::PromptAgentExec { slug } => {
+                self.prompt_agent_exec(slug);
+            }
             AppEvent::OpenByokManager => {
                 self.open_byok_manager();
+            }
+            AppEvent::StartAgentEdit {
+                existing_slug,
+                return_to,
+            } => {
+                self.start_agent_edit(existing_slug, return_to);
+            }
+            AppEvent::BeginAgentFieldEdit { field } => {
+                self.begin_agent_field_edit(field);
+            }
+            AppEvent::AgentFieldEditCancelled => {
+                if self.agent_draft.is_some() {
+                    self.show_agent_edit_view();
+                } else {
+                    self.open_agent_manager();
+                }
+            }
+            AppEvent::UpdateAgentDraftField { field, value } => {
+                self.update_agent_draft_field(field, value);
+            }
+            AppEvent::SubmitAgentForm => {
+                self.submit_agent_form();
+            }
+            AppEvent::AgentEditCancelRequested => {
+                self.show_agent_discard_confirmation();
+            }
+            AppEvent::AgentEditDiscardConfirmed => {
+                self.chat_widget.pop_bottom_view();
+                self.chat_widget.pop_bottom_view();
+                self.agent_draft = None;
+                self.agent_edit_dirty_flag = None;
+                self.agent_draft_dirty = false;
+                self.reopen_agent_parent_view();
+            }
+            AppEvent::AgentEditContinueEditing => {
+                self.chat_widget.pop_bottom_view();
+            }
+            AppEvent::DeleteAgent { slug } => {
+                self.delete_agent(slug);
+            }
+            AppEvent::ShowAgentRunsOverlay => {
+                self.show_agent_runs_overlay();
+            }
+            AppEvent::AgentRunsOverlayClosed => {
+                self.agent_runs_overlay_open = false;
+            }
+            AppEvent::ShowAgentRunActions { run_id } => {
+                self.show_agent_run_actions(run_id);
+            }
+            AppEvent::ToggleAgentRunExpanded { run_id } => {
+                let reopen = self.agent_runs_overlay_open;
+                self.agent_runs_overlay_open = false;
+                self.toggle_agent_run_expanded(&run_id);
+                if reopen {
+                    self.show_agent_runs_overlay();
+                }
+            }
+            AppEvent::ToggleAgentRunPaused { run_id } => {
+                let reopen = self.agent_runs_overlay_open;
+                self.agent_runs_overlay_open = false;
+                self.toggle_agent_run_paused(&run_id);
+                if reopen {
+                    self.show_agent_runs_overlay();
+                }
+            }
+            AppEvent::ClearCompletedAgentRuns => {
+                let reopen = self.agent_runs_overlay_open;
+                self.agent_runs_overlay_open = false;
+                self.clear_completed_agent_runs();
+                if reopen {
+                    self.show_agent_runs_overlay();
+                }
+            }
+            AppEvent::RemoveAgentRun { run_id } => {
+                let reopen = self.agent_runs_overlay_open;
+                self.agent_runs_overlay_open = false;
+                self.remove_agent_run(&run_id);
+                if reopen {
+                    self.show_agent_runs_overlay();
+                }
+            }
+            AppEvent::ShowAgentRunTranscript { run_id } => {
+                let reopen = self.agent_runs_overlay_open;
+                self.agent_runs_overlay_open = false;
+                self.show_agent_run_transcript(&run_id);
+                if reopen {
+                    self.show_agent_runs_overlay();
+                }
             }
             AppEvent::ShowByokProviderActions { provider_id } => {
                 self.show_byok_provider_actions(&provider_id);
@@ -1222,6 +1660,30 @@ impl App {
             }
             AppEvent::ShowByokProviderModels { provider_id } => {
                 self.show_byok_provider_models(&provider_id);
+            }
+            AppEvent::ExecAgentCommand { agent, prompt } => {
+                self.exec_agent_command(agent, prompt);
+            }
+            AppEvent::AgentRunOutput {
+                run_id,
+                agent_slug,
+                agent_name,
+                line,
+                is_error,
+            } => {
+                self.on_agent_run_output(run_id, agent_slug, agent_name, line, is_error);
+            }
+            AppEvent::AgentRunCompleted {
+                run_id,
+                agent_slug,
+                agent_name,
+                exit_code,
+                status,
+                note,
+            } => {
+                self.on_agent_run_completed(
+                    run_id, agent_slug, agent_name, exit_code, status, note,
+                );
             }
             AppEvent::SubmitByokForm { original_id, form } => {
                 if let Err(err) = self.submit_byok_form(original_id, form) {
@@ -1332,6 +1794,40 @@ impl App {
             items,
             ..Default::default()
         };
+        self.chat_widget.show_selection_view(params);
+    }
+
+    fn show_agent_discard_confirmation(&mut self) {
+        let mut items: Vec<SelectionItem> = Vec::new();
+        items.push(SelectionItem {
+            name: "Discard changes".to_string(),
+            description: Some("Lose all unsaved edits and close the editor".to_string()),
+            actions: vec![Box::new(|tx: &AppEventSender| {
+                tx.send(AppEvent::AgentEditDiscardConfirmed);
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+        items.push(SelectionItem {
+            name: "Continue editing".to_string(),
+            actions: vec![Box::new(|tx: &AppEventSender| {
+                tx.send(AppEvent::AgentEditContinueEditing);
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        let mut params = SelectionViewParams {
+            title: Some("Discard agent changes?".to_string()),
+            subtitle: Some("You have unsaved edits.".to_string()),
+            footer_hint: Some("Enter to choose · Esc to keep editing".into()),
+            items,
+            ..Default::default()
+        };
+        params.cancel_handler = Some(Box::new(|tx: &AppEventSender| {
+            tx.send(AppEvent::AgentEditContinueEditing);
+            true
+        }));
         self.chat_widget.show_selection_view(params);
     }
 
@@ -1596,6 +2092,1439 @@ impl App {
     fn handle_memory_suggest_error(&mut self, query: String, error: String) {
         let message = format!("Memory suggestion for \"{query}\" failed: {error}");
         self.chat_widget.add_error_message(message);
+    }
+
+    fn open_agent_manager(&mut self) {
+        if self.agent_store.is_none() {
+            self.chat_widget
+                .add_error_message("Agent storage is unavailable in this workspace.".to_string());
+            return;
+        }
+        self.agent_draft = None;
+        self.agent_edit_dirty_flag = None;
+        self.agent_draft_dirty = false;
+        self.refresh_agent_profiles();
+        let mut items: Vec<SelectionItem> = Vec::new();
+
+        if self.agent_profiles.is_empty() {
+            items.push(SelectionItem {
+                name: "No agents configured".to_string(),
+                description: Some(
+                    "Use `codex-agentic exec --agent <name>` from the CLI to create runs."
+                        .to_string(),
+                ),
+                dismiss_on_select: true,
+                ..Default::default()
+            });
+        } else {
+            for profile in &self.agent_profiles {
+                let summary = self.format_agent_summary(profile);
+                let slug = profile.slug.clone();
+                items.push(SelectionItem {
+                    name: profile.name.clone(),
+                    description: summary,
+                    actions: vec![Box::new(move |tx: &AppEventSender| {
+                        tx.send(AppEvent::ShowAgentActions { slug: slug.clone() });
+                    })],
+                    dismiss_on_select: true,
+                    search_value: Some(profile.slug.clone()),
+                    ..Default::default()
+                });
+            }
+        }
+
+        if !self.active_agent_runs.is_empty() {
+            items.push(SelectionItem {
+                name: "View active runs".to_string(),
+                description: Some("Inspect background executions".to_string()),
+                actions: vec![Box::new(|tx: &AppEventSender| {
+                    tx.send(AppEvent::ShowAgentRunsOverlay);
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            });
+        }
+
+        items.push(SelectionItem {
+            name: "Add agent".to_string(),
+            description: Some("Create a new agent persona".to_string()),
+            actions: vec![Box::new(|tx: &AppEventSender| {
+                tx.send(AppEvent::StartAgentEdit {
+                    existing_slug: None,
+                    return_to: AgentEditReturn::AgentManager,
+                });
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        items.push(SelectionItem {
+            name: "Close".to_string(),
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        let params = SelectionViewParams {
+            title: Some("/agent — Configured agents".to_string()),
+            subtitle: Some("Select an action for an agent or add a new one.".to_string()),
+            footer_hint: Some("Enter to choose · Esc to dismiss".into()),
+            items,
+            ..Default::default()
+        };
+
+        self.chat_widget.show_selection_view(params);
+    }
+
+    fn refresh_agent_profiles(&mut self) {
+        if let Some(store) = self.agent_store.as_ref() {
+            match store.list_profiles() {
+                Ok(profiles) => {
+                    self.agent_profiles = profiles;
+                }
+                Err(err) => {
+                    warn!(%err, "failed to list agent profiles");
+                    self.agent_profiles.clear();
+                }
+            }
+        } else {
+            self.agent_profiles.clear();
+        }
+    }
+
+    fn set_agent_draft_dirty(&mut self, dirty: bool) {
+        self.agent_draft_dirty = dirty;
+        if let Some(flag) = self.agent_edit_dirty_flag.as_ref() {
+            flag.store(dirty, Ordering::SeqCst);
+        }
+    }
+
+    fn show_agent_actions(&mut self, slug: String) {
+        if self.agent_store.is_none() {
+            self.chat_widget
+                .add_error_message("Agent storage is unavailable.".to_string());
+            return;
+        }
+        self.refresh_agent_profiles();
+        let Some(profile) = self
+            .agent_profiles
+            .iter()
+            .find(|profile| profile.slug == slug)
+        else {
+            self.chat_widget
+                .add_error_message(format!("Agent `{slug}` not found."));
+            self.open_agent_manager();
+            return;
+        };
+
+        let summary = self.format_agent_summary(profile);
+        let mut items: Vec<SelectionItem> = Vec::new();
+        let run_slug = profile.slug.clone();
+        items.push(SelectionItem {
+            name: "Run agent".to_string(),
+            description: Some("Prompt for instructions, then launch via CLI.".to_string()),
+            actions: vec![Box::new(move |tx: &AppEventSender| {
+                tx.send(AppEvent::PromptAgentExec {
+                    slug: run_slug.clone(),
+                });
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        let edit_slug = profile.slug.clone();
+        items.push(SelectionItem {
+            name: "Edit agent".to_string(),
+            description: Some("Modify persona, prompts, defaults".to_string()),
+            actions: vec![Box::new(move |tx: &AppEventSender| {
+                tx.send(AppEvent::StartAgentEdit {
+                    existing_slug: Some(edit_slug.clone()),
+                    return_to: AgentEditReturn::AgentActions {
+                        slug: edit_slug.clone(),
+                    },
+                });
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        let delete_slug = profile.slug.clone();
+        items.push(SelectionItem {
+            name: "Delete agent".to_string(),
+            description: Some("Remove this agent profile".to_string()),
+            actions: vec![Box::new(move |tx: &AppEventSender| {
+                tx.send(AppEvent::DeleteAgent {
+                    slug: delete_slug.clone(),
+                });
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        let back_slug = if let AgentEditReturn::AgentActions { slug } = &self.agent_edit_return {
+            Some(slug.clone())
+        } else {
+            None
+        };
+        let back_action: SelectionAction = if let Some(slug) = back_slug {
+            Box::new(move |tx: &AppEventSender| {
+                tx.send(AppEvent::ShowAgentActions { slug: slug.clone() });
+            })
+        } else {
+            Box::new(|tx: &AppEventSender| {
+                tx.send(AppEvent::OpenAgentManager);
+            })
+        };
+        items.push(SelectionItem {
+            name: "Back".to_string(),
+            actions: vec![back_action],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        let mut params = SelectionViewParams {
+            title: Some(format!("Agent: {}", profile.name)),
+            subtitle: summary,
+            footer_hint: Some("Enter to choose an action · Esc to return".into()),
+            items,
+            ..Default::default()
+        };
+        params.cancel_handler = Some(Box::new(|tx: &AppEventSender| {
+            tx.send(AppEvent::OpenAgentManager);
+            true
+        }));
+
+        self.chat_widget.show_selection_view(params);
+    }
+
+    fn prompt_agent_exec(&mut self, slug: String) {
+        if self.agent_store.is_none() {
+            self.chat_widget
+                .add_error_message("Agent storage is unavailable.".to_string());
+            return;
+        }
+        self.refresh_agent_profiles();
+        let Some(profile) = self
+            .agent_profiles
+            .iter()
+            .find(|profile| profile.slug == slug)
+        else {
+            self.chat_widget
+                .add_error_message(format!("Agent `{slug}` not found."));
+            self.open_agent_manager();
+            return;
+        };
+
+        let tx = self.app_event_tx.clone();
+        let slug_clone = profile.slug.clone();
+        let agent_name = profile.name.clone();
+        let on_submit: PromptSubmitted = Box::new(move |value: String| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return;
+            }
+            tx.send(AppEvent::ExecAgentCommand {
+                agent: slug_clone.clone(),
+                prompt: trimmed.to_string(),
+            });
+        });
+
+        let view = CustomPromptView::new(
+            format!("Run agent `{agent_name}`"),
+            "Describe the task for this agent".to_string(),
+            None,
+            on_submit,
+        );
+        self.chat_widget
+            .push_bottom_view(move |pane| pane.show_view(Box::new(view)));
+    }
+
+    fn format_agent_summary(&self, profile: &AgentProfile) -> Option<String> {
+        let mut details: Vec<String> = Vec::new();
+        if let Some(desc) = profile.description.as_deref()
+            && !desc.trim().is_empty()
+        {
+            details.push(desc.trim().to_string());
+        }
+        if let Some(prompt) = profile.priming_prompt.as_ref()
+            && !prompt.trim().is_empty()
+        {
+            details.push("Priming prompt set".to_string());
+        }
+        if !profile.default_command.is_empty() {
+            details.push(format!("Command: {}", profile.default_command.join(" ")));
+        }
+        if !profile.enabled_tools.is_empty() {
+            details.push(format!("Tools: {}", profile.enabled_tools.join(", ")));
+        }
+        if details.is_empty() {
+            None
+        } else {
+            Some(details.join(" • "))
+        }
+    }
+
+    fn start_agent_edit(&mut self, existing_slug: Option<String>, return_to: AgentEditReturn) {
+        if self.agent_store.is_none() {
+            self.chat_widget
+                .add_error_message("Agent storage is unavailable.".to_string());
+            return;
+        }
+        self.agent_edit_return = return_to;
+        let draft = if let Some(slug) = existing_slug {
+            self.refresh_agent_profiles();
+            match self
+                .agent_profiles
+                .iter()
+                .find(|profile| profile.slug == slug)
+            {
+                Some(profile) => AgentDraft::from_profile(profile),
+                None => {
+                    self.chat_widget
+                        .add_error_message(format!("Agent `{slug}` not found."));
+                    return;
+                }
+            }
+        } else {
+            AgentDraft::new()
+        };
+        self.agent_draft = Some(draft);
+        let flag = Arc::new(AtomicBool::new(false));
+        self.agent_edit_dirty_flag = Some(flag);
+        self.set_agent_draft_dirty(false);
+        self.show_agent_edit_view();
+    }
+
+    fn begin_agent_field_edit(&mut self, field: AgentDraftField) {
+        let Some(draft) = self.agent_draft.as_ref() else {
+            self.open_agent_manager();
+            return;
+        };
+
+        let (title, placeholder, context, initial_value, fullscreen) = match field {
+            AgentDraftField::Name => (
+                "Agent name".to_string(),
+                "Enter a friendly display name".to_string(),
+                Some(format!("Current: {}", draft.name)),
+                draft.name.clone(),
+                false,
+            ),
+            AgentDraftField::Description => (
+                "Description".to_string(),
+                "Optional summary".to_string(),
+                if draft.description.is_empty() {
+                    None
+                } else {
+                    Some(format!("Current: {}", draft.description))
+                },
+                draft.description.clone(),
+                false,
+            ),
+            AgentDraftField::PrimingPrompt => (
+                "Priming prompt".to_string(),
+                "Instructions prepended to every run".to_string(),
+                None,
+                draft.priming_prompt.clone(),
+                true,
+            ),
+            AgentDraftField::DefaultCommand => (
+                "Default command".to_string(),
+                "Shell command tokens (space-separated)".to_string(),
+                draft
+                    .default_command
+                    .is_empty()
+                    .then_some("Currently unset".to_string()),
+                draft.default_command.clone(),
+                false,
+            ),
+            AgentDraftField::EnabledTools => (
+                "Enabled tools".to_string(),
+                "Space/comma separated tool names".to_string(),
+                draft
+                    .enabled_tools
+                    .is_empty()
+                    .then_some("Currently unset".to_string()),
+                draft.enabled_tools.clone(),
+                false,
+            ),
+            AgentDraftField::ApprovalMode => (
+                "Approval mode".to_string(),
+                "Override approval policy (optional)".to_string(),
+                draft
+                    .approval_mode
+                    .as_deref()
+                    .map(|value| format!("Current: {value}")),
+                draft.approval_mode.clone().unwrap_or_default(),
+                false,
+            ),
+            AgentDraftField::SandboxMode => (
+                "Sandbox mode".to_string(),
+                "Override sandbox policy (optional)".to_string(),
+                draft
+                    .sandbox_mode
+                    .as_deref()
+                    .map(|value| format!("Current: {value}")),
+                draft.sandbox_mode.clone().unwrap_or_default(),
+                false,
+            ),
+        };
+
+        let tx = self.app_event_tx.clone();
+        let field_copy = field;
+        let on_submit: PromptSubmitted = Box::new(move |value: String| {
+            tx.send(AppEvent::UpdateAgentDraftField {
+                field: field_copy,
+                value,
+            });
+        });
+
+        let cancel_tx = self.app_event_tx.clone();
+        let on_cancel: PromptCancelled = Box::new(move || {
+            cancel_tx.send(AppEvent::AgentFieldEditCancelled);
+        });
+
+        let mut view = CustomPromptView::new(title, placeholder, context, on_submit)
+            .with_allow_empty_submit(true)
+            .with_on_cancel(on_cancel)
+            .with_initial_text(initial_value);
+        if fullscreen {
+            view = view.with_full_height(true);
+        }
+        self.chat_widget
+            .push_bottom_view(move |pane| pane.show_view(Box::new(view)));
+    }
+
+    fn show_agent_edit_view(&mut self) {
+        let Some(draft) = self.agent_draft.as_ref() else {
+            self.open_agent_manager();
+            return;
+        };
+
+        let mut items: Vec<SelectionItem> = Vec::new();
+        items.push(SelectionItem {
+            name: format!(
+                "Name: {}",
+                if draft.name.is_empty() {
+                    "<required>"
+                } else {
+                    draft.name.as_str()
+                }
+            ),
+            actions: vec![Box::new(|tx: &AppEventSender| {
+                tx.send(AppEvent::BeginAgentFieldEdit {
+                    field: AgentDraftField::Name,
+                });
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+        items.push(SelectionItem {
+            name: format!(
+                "Description: {}",
+                if draft.description.is_empty() {
+                    "<none>"
+                } else {
+                    draft.description.as_str()
+                }
+            ),
+            actions: vec![Box::new(|tx: &AppEventSender| {
+                tx.send(AppEvent::BeginAgentFieldEdit {
+                    field: AgentDraftField::Description,
+                });
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+        items.push(SelectionItem {
+            name: "Priming prompt".to_string(),
+            description: if draft.priming_prompt.is_empty() {
+                Some("Currently unset".to_string())
+            } else {
+                Some(draft.priming_prompt.clone())
+            },
+            actions: vec![Box::new(|tx: &AppEventSender| {
+                tx.send(AppEvent::BeginAgentFieldEdit {
+                    field: AgentDraftField::PrimingPrompt,
+                });
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+        items.push(SelectionItem {
+            name: format!(
+                "Default command: {}",
+                if draft.default_command.is_empty() {
+                    "<none>"
+                } else {
+                    draft.default_command.as_str()
+                }
+            ),
+            actions: vec![Box::new(|tx: &AppEventSender| {
+                tx.send(AppEvent::BeginAgentFieldEdit {
+                    field: AgentDraftField::DefaultCommand,
+                });
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+        items.push(SelectionItem {
+            name: format!(
+                "Enabled tools: {}",
+                if draft.enabled_tools.is_empty() {
+                    "<none>"
+                } else {
+                    draft.enabled_tools.as_str()
+                }
+            ),
+            actions: vec![Box::new(|tx: &AppEventSender| {
+                tx.send(AppEvent::BeginAgentFieldEdit {
+                    field: AgentDraftField::EnabledTools,
+                });
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+        items.push(SelectionItem {
+            name: format!(
+                "Approval mode: {}",
+                draft
+                    .approval_mode
+                    .as_deref()
+                    .unwrap_or("<inherit session default>")
+            ),
+            actions: vec![Box::new(|tx: &AppEventSender| {
+                tx.send(AppEvent::BeginAgentFieldEdit {
+                    field: AgentDraftField::ApprovalMode,
+                });
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+        items.push(SelectionItem {
+            name: format!(
+                "Sandbox mode: {}",
+                draft
+                    .sandbox_mode
+                    .as_deref()
+                    .unwrap_or("<inherit session default>")
+            ),
+            actions: vec![Box::new(|tx: &AppEventSender| {
+                tx.send(AppEvent::BeginAgentFieldEdit {
+                    field: AgentDraftField::SandboxMode,
+                });
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        items.push(SelectionItem {
+            name: "Save agent".to_string(),
+            description: Some("Persist profile to .codex/agents".to_string()),
+            actions: vec![Box::new(|tx: &AppEventSender| {
+                tx.send(AppEvent::SubmitAgentForm);
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        if let Some(slug) = draft.original_slug.as_ref() {
+            let slug_clone = slug.clone();
+            items.push(SelectionItem {
+                name: "Delete agent".to_string(),
+                description: Some("Remove this agent profile".to_string()),
+                actions: vec![Box::new(move |tx: &AppEventSender| {
+                    tx.send(AppEvent::DeleteAgent {
+                        slug: slug_clone.clone(),
+                    });
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            });
+        }
+
+        let back_slug = if let AgentEditReturn::AgentActions { slug } = &self.agent_edit_return {
+            Some(slug.clone())
+        } else {
+            None
+        };
+        let back_action: SelectionAction = if let Some(slug) = back_slug.clone() {
+            Box::new(move |tx: &AppEventSender| {
+                tx.send(AppEvent::ShowAgentActions { slug: slug.clone() });
+            })
+        } else {
+            Box::new(|tx: &AppEventSender| {
+                tx.send(AppEvent::OpenAgentManager);
+            })
+        };
+        items.push(SelectionItem {
+            name: "Back".to_string(),
+            actions: vec![back_action],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        let title = draft
+            .original_slug
+            .as_ref()
+            .map(|slug| format!("Edit agent ({slug})"))
+            .unwrap_or_else(|| "Add agent".to_string());
+
+        let dirty_flag = self.agent_edit_dirty_flag.clone();
+        let mut params = SelectionViewParams {
+            title: Some(title),
+            subtitle: Some("Select a field to edit, then save.".to_string()),
+            footer_hint: Some("Enter to edit field, Esc to cancel.".into()),
+            items,
+            ..Default::default()
+        };
+        let cancel_slug = back_slug;
+        params.cancel_handler = Some(Box::new(move |tx: &AppEventSender| {
+            if dirty_flag
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::SeqCst))
+            {
+                tx.send(AppEvent::AgentEditCancelRequested);
+                false
+            } else {
+                match cancel_slug.as_ref() {
+                    Some(slug) => tx.send(AppEvent::ShowAgentActions { slug: slug.clone() }),
+                    None => tx.send(AppEvent::OpenAgentManager),
+                }
+                true
+            }
+        }));
+
+        self.chat_widget.show_selection_view(params);
+    }
+
+    fn update_agent_draft_field(&mut self, field: AgentDraftField, value: String) {
+        if let Some(draft) = self.agent_draft.as_mut() {
+            draft.apply_field(field, value);
+            self.set_agent_draft_dirty(true);
+            self.show_agent_edit_view();
+        } else {
+            self.open_agent_manager();
+        }
+    }
+
+    fn submit_agent_form(&mut self) {
+        let Some(store) = self.agent_store.as_ref() else {
+            self.chat_widget
+                .add_error_message("Agent storage is unavailable.".to_string());
+            return;
+        };
+        let Some(draft) = self.agent_draft.take() else {
+            self.open_agent_manager();
+            return;
+        };
+        match draft.into_profile() {
+            Ok(profile) => {
+                let name = profile.name.clone();
+                match store.upsert_profile(profile) {
+                    Ok(_) => {
+                        self.chat_widget
+                            .add_info_message(format!("Saved agent `{name}`."), None);
+                        self.set_agent_draft_dirty(false);
+                        self.agent_edit_dirty_flag = None;
+                        self.agent_draft = None;
+                        self.refresh_agent_profiles();
+                        self.reopen_agent_parent_view();
+                    }
+                    Err(err) => {
+                        self.chat_widget
+                            .add_error_message(format!("Failed to save agent: {err}"));
+                        self.agent_draft = Some(AgentDraft::from_profile(
+                            self.agent_profiles
+                                .iter()
+                                .find(|p| p.name == name)
+                                .unwrap_or(&AgentProfile {
+                                    name,
+                                    slug: String::new(),
+                                    ..AgentProfile::default()
+                                }),
+                        ));
+                        self.show_agent_edit_view();
+                    }
+                }
+            }
+            Err(err) => {
+                self.chat_widget.add_error_message(err);
+                self.show_agent_edit_view();
+            }
+        }
+    }
+
+    fn reopen_agent_parent_view(&mut self) {
+        let target = std::mem::replace(&mut self.agent_edit_return, AgentEditReturn::AgentManager);
+        match target {
+            AgentEditReturn::AgentActions { slug } => {
+                self.show_agent_actions(slug);
+            }
+            AgentEditReturn::AgentManager => self.open_agent_manager(),
+        }
+    }
+
+    fn exec_agent_command(&mut self, agent: String, prompt: String) {
+        let Some(store) = self.agent_store.clone() else {
+            self.chat_widget
+                .add_error_message("Agent storage is unavailable.".to_string());
+            return;
+        };
+        self.refresh_agent_profiles();
+        let lookup = agent.trim();
+        let profile = self.agent_profiles.iter().find(|profile| {
+            profile.slug.eq_ignore_ascii_case(lookup) || profile.name.eq_ignore_ascii_case(lookup)
+        });
+
+        let Some(profile) = profile else {
+            self.chat_widget.add_error_message(format!(
+                "Agent `{lookup}` not found. Run `/agent` to list available agents."
+            ));
+            return;
+        };
+
+        let trimmed_prompt = prompt.trim();
+        if trimmed_prompt.is_empty() {
+            self.chat_widget
+                .add_error_message("Agent prompt cannot be empty.".to_string());
+            return;
+        }
+
+        let profile = profile.clone();
+        let prompt_owned = trimmed_prompt.to_string();
+        let command_tokens = self.build_agent_exec_command(&profile, trimmed_prompt);
+        if command_tokens.is_empty() {
+            self.chat_widget.add_error_message(format!(
+                "Agent `{}` does not have a runnable command configured.",
+                profile.name
+            ));
+            return;
+        }
+
+        let run_id = Uuid::now_v7().to_string();
+        let prompt_preview = Self::prompt_preview(&prompt_owned);
+        let log_path = store
+            .instance_dir(&profile.slug, &run_id)
+            .join("events.jsonl");
+        let mut context_snapshot: AgentRunContext = (&profile).into();
+        let mut context_command = command_tokens.clone();
+        if !prompt_owned.is_empty() && !context_command.is_empty() {
+            context_command.pop();
+        }
+        context_snapshot.command_line = context_command.clone();
+        if context_snapshot
+            .command_line
+            .iter()
+            .any(|token| token == "--dangerously-bypass-approvals-and-sandbox" || token == "--yolo")
+        {
+            context_snapshot
+                .dangerous_flags
+                .push("dangerously_bypass_approvals_and_sandbox".to_string());
+        }
+        let run_context_for_record = context_snapshot.clone();
+        if let Err(err) = store.begin_run(
+            &profile.slug,
+            &run_id,
+            Some(prompt_owned.clone()),
+            Some(run_context_for_record),
+        ) {
+            self.chat_widget
+                .add_error_message(format!("Failed to start agent run: {err}"));
+            return;
+        }
+
+        let mut run = ActiveAgentRun::new(
+            run_id.clone(),
+            profile.slug.clone(),
+            profile.name.clone(),
+            prompt_preview.clone(),
+            command_tokens.clone(),
+            log_path.clone(),
+        );
+        run.last_note = Some("launching".to_string());
+        run.push_log(AgentRunLogEntry {
+            stream: AgentRunLogStream::Info,
+            message: format!("prompt: {prompt_preview}"),
+            timestamp: Utc::now(),
+        });
+        self.active_agent_runs.push(run);
+        self.refresh_agent_status_line();
+
+        let tx = self.app_event_tx.clone();
+        let workdir = self.config.cwd.clone();
+        let agent_slug = profile.slug.clone();
+        let agent_name = profile.name;
+        tokio::spawn(spawn_agent_run_process(
+            command_tokens,
+            workdir,
+            run_id,
+            agent_slug,
+            agent_name,
+            prompt_owned,
+            log_path,
+            store,
+            tx,
+            context_snapshot,
+        ));
+    }
+
+    fn on_agent_run_output(
+        &mut self,
+        run_id: String,
+        _agent_slug: String,
+        _agent_name: String,
+        line: String,
+        is_error: bool,
+    ) {
+        let clipped = Self::truncate_line(&line);
+        if let Some(run) = self.find_agent_run_mut(&run_id) {
+            if !run.paused {
+                run.last_note = Some(clipped);
+            }
+            run.push_log(AgentRunLogEntry {
+                stream: if is_error {
+                    AgentRunLogStream::Stderr
+                } else {
+                    AgentRunLogStream::Stdout
+                },
+                message: line,
+                timestamp: Utc::now(),
+            });
+        }
+        self.refresh_agent_status_line();
+    }
+
+    fn on_agent_run_completed(
+        &mut self,
+        run_id: String,
+        agent_slug: String,
+        agent_name: String,
+        exit_code: Option<i32>,
+        status: AgentRunStatus,
+        note: Option<String>,
+    ) {
+        let mut summary_note = note.clone();
+        let mut chat_summary: Option<String> = None;
+
+        if let Some(run) = self.find_agent_run_mut(&run_id) {
+            run.mark_status(status.clone(), exit_code, note.clone());
+            if let Some(text) = note {
+                run.push_log(AgentRunLogEntry {
+                    stream: AgentRunLogStream::Info,
+                    message: text,
+                    timestamp: Utc::now(),
+                });
+            } else if summary_note.is_none() {
+                summary_note = run.last_note.clone();
+            }
+            if chat_summary.is_none() {
+                chat_summary = summary_note.clone().or_else(|| run.last_note.clone());
+            }
+        }
+
+        let run_snapshot = self
+            .active_agent_runs
+            .iter()
+            .find(|run| run.run_id == run_id)
+            .cloned();
+
+        let status_label = match status {
+            AgentRunStatus::Completed => "completed successfully".to_string(),
+            AgentRunStatus::Failed => {
+                if let Some(code) = exit_code {
+                    format!("failed (exit {code})")
+                } else {
+                    "failed".to_string()
+                }
+            }
+            AgentRunStatus::Cancelled => "was cancelled".to_string(),
+            AgentRunStatus::Running => "is still running".to_string(),
+        };
+
+        let final_summary = chat_summary.unwrap_or_else(|| status_label.clone());
+        if summary_note.is_none() {
+            summary_note = Some(final_summary.clone());
+        }
+
+        self.prune_completed_agent_runs();
+        self.refresh_agent_status_line();
+        self.persist_agent_run_summary(agent_slug, run_id.clone(), summary_note);
+        self.announce_agent_summary(&agent_name, &run_id, &final_summary, run_snapshot.as_ref());
+    }
+
+    fn truncate_line(line: &str) -> String {
+        if line.len() <= AGENT_PROMPT_PREVIEW_CHARS {
+            return line.to_string();
+        }
+        let mut truncated = line
+            .chars()
+            .take(AGENT_PROMPT_PREVIEW_CHARS)
+            .collect::<String>();
+        truncated.push('…');
+        truncated
+    }
+
+    fn announce_agent_summary(
+        &mut self,
+        agent_name: &str,
+        run_id: &str,
+        summary: &str,
+        run_snapshot: Option<&ActiveAgentRun>,
+    ) {
+        let trimmed = summary.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let short_id = short_run_id(run_id);
+        let mut lines = vec![format!(
+            "Background agent `{agent_name}` [{short_id}] {trimmed}"
+        )];
+
+        if let Some(run) = run_snapshot {
+            if !run.prompt_preview.is_empty() {
+                lines.push(format!("Prompt: {}", run.prompt_preview));
+            }
+            if !run.command_line.is_empty() {
+                lines.push(format!("Command: {}", run.command_line.join(" ")));
+            }
+            if !run.logs.is_empty() {
+                let recent: Vec<String> = run
+                    .logs
+                    .iter()
+                    .rev()
+                    .take(3)
+                    .map(|entry| {
+                        let stream = match entry.stream {
+                            AgentRunLogStream::Info => "info",
+                            AgentRunLogStream::Stdout => "stdout",
+                            AgentRunLogStream::Stderr => "stderr",
+                        };
+                        format!("{stream}: {}", Self::truncate_line(&entry.message))
+                    })
+                    .collect();
+                lines.push(format!("Recent output: {}", recent.join(" | ")));
+            }
+        }
+
+        let message = lines.join("\n");
+        self.chat_widget.add_info_message(
+            message.clone(),
+            Some("Press Ctrl+T (or /agent runs) to review the full transcript.".to_string()),
+        );
+        self.chat_widget.queue_context_note(message);
+    }
+
+    fn find_agent_run_mut(&mut self, run_id: &str) -> Option<&mut ActiveAgentRun> {
+        self.active_agent_runs
+            .iter_mut()
+            .find(|run| run.run_id == run_id)
+    }
+
+    fn prune_completed_agent_runs(&mut self) {
+        let mut completed = self
+            .active_agent_runs
+            .iter()
+            .filter(|run| !matches!(run.status, AgentRunStatus::Running))
+            .count();
+        while completed > 3 {
+            if let Some(pos) = self
+                .active_agent_runs
+                .iter()
+                .position(|run| !matches!(run.status, AgentRunStatus::Running))
+            {
+                let removed = self.active_agent_runs.remove(pos);
+                self.expanded_agent_runs.remove(&removed.run_id);
+                completed -= 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn build_agent_exec_command(&self, profile: &AgentProfile, prompt: &str) -> Vec<String> {
+        let mut tokens = if profile.default_command.is_empty() {
+            Self::default_agent_exec_args()
+        } else {
+            Self::normalize_agent_command(profile.default_command.clone())
+        };
+        if tokens.is_empty() {
+            tokens = Self::default_agent_exec_args();
+        }
+
+        if !Self::command_has_agent_flag(&tokens) {
+            tokens.push("--agent".to_string());
+            tokens.push(profile.slug.clone());
+        }
+
+        Self::ensure_feature_enabled(&mut tokens, "apply_patch_freeform");
+
+        if !prompt.is_empty() {
+            tokens.push(prompt.to_string());
+        }
+
+        tokens
+    }
+
+    fn default_agent_exec_args() -> Vec<String> {
+        let resolved = Self::resolve_agent_exec_binary();
+        vec![resolved, "exec".to_string()]
+    }
+
+    fn normalize_agent_command(mut tokens: Vec<String>) -> Vec<String> {
+        if let Some(first) = tokens.first_mut() {
+            let command_name = Path::new(first)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(first);
+            let is_simple_name = !first.contains('/') && !first.contains('\\');
+            let should_use_agentic = matches!(command_name, "codex" | "codex-agentic");
+            if should_use_agentic && is_simple_name {
+                *first = Self::resolve_agent_exec_binary();
+            }
+        }
+        tokens
+    }
+
+    fn resolve_agent_exec_binary() -> String {
+        if let Ok(path) = env::current_exe() {
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == "codex-agentic")
+            {
+                return path.to_string_lossy().to_string();
+            }
+            if let Some(dir) = path.parent() {
+                let candidate = dir.join("codex-agentic");
+                if candidate.exists() {
+                    return candidate.to_string_lossy().to_string();
+                }
+            }
+        }
+        "codex-agentic".to_string()
+    }
+
+    fn command_has_agent_flag(tokens: &[String]) -> bool {
+        tokens
+            .iter()
+            .any(|token| token == "--agent" || token == "-a" || token.starts_with("--agent="))
+    }
+
+    fn prompt_preview(prompt: &str) -> String {
+        let mut normalized = prompt.replace(['\n', '\r'], " ");
+        if normalized.len() > AGENT_PROMPT_PREVIEW_CHARS {
+            normalized.truncate(AGENT_PROMPT_PREVIEW_CHARS);
+            normalized.push('…');
+        }
+        normalized
+    }
+
+    fn ensure_feature_enabled(tokens: &mut Vec<String>, feature: &str) {
+        if Self::has_feature_flag(tokens, feature) {
+            return;
+        }
+        let insert_at = tokens
+            .iter()
+            .position(|token| token == "exec")
+            .unwrap_or(tokens.len());
+        tokens.insert(insert_at, feature.to_string());
+        tokens.insert(insert_at, "--enable".to_string());
+    }
+
+    fn has_feature_flag(tokens: &[String], feature: &str) -> bool {
+        tokens.iter().enumerate().any(|(idx, token)| {
+            if token == "--enable" {
+                tokens.get(idx + 1).is_some_and(|value| value == feature)
+            } else {
+                token == &format!("--enable={feature}")
+            }
+        })
+    }
+
+    fn delete_agent(&mut self, slug: String) {
+        let Some(store) = self.agent_store.as_ref() else {
+            self.chat_widget
+                .add_error_message("Agent storage is unavailable.".to_string());
+            return;
+        };
+        match store.delete_profile(&slug) {
+            Ok(_) => {
+                self.chat_widget
+                    .add_info_message(format!("Deleted agent `{slug}`."), None);
+                self.refresh_agent_profiles();
+                self.open_agent_manager();
+            }
+            Err(err) => {
+                self.chat_widget
+                    .add_error_message(format!("Failed to delete agent: {err}"));
+                self.open_agent_manager();
+            }
+        }
+    }
+
+    fn show_agent_runs_overlay(&mut self) {
+        if self.agent_runs_overlay_open {
+            self.chat_widget.pop_bottom_view();
+        }
+        if self.active_agent_runs.is_empty() {
+            self.chat_widget
+                .add_info_message("No agent runs have started yet.".to_string(), None);
+            self.agent_runs_overlay_open = false;
+            return;
+        }
+
+        let mut items: Vec<SelectionItem> = Vec::new();
+        for run in &self.active_agent_runs {
+            let short_id = short_run_id(&run.run_id);
+            let icon = match run.status {
+                AgentRunStatus::Running => "●",
+                AgentRunStatus::Completed => "○",
+                AgentRunStatus::Failed => "×",
+                AgentRunStatus::Cancelled => "◌",
+            };
+            let paused_suffix = if run.paused { " [paused]" } else { "" };
+            let name = format!(
+                "{} {} [{}]{}",
+                icon, run.agent_name, short_id, paused_suffix
+            );
+            let description = self.describe_agent_run(run);
+            let run_id = run.run_id.clone();
+            items.push(SelectionItem {
+                name,
+                description: Some(description),
+                actions: vec![Box::new(move |tx: &AppEventSender| {
+                    tx.send(AppEvent::ShowAgentRunActions {
+                        run_id: run_id.clone(),
+                    });
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            });
+        }
+
+        if self
+            .active_agent_runs
+            .iter()
+            .any(|run| !matches!(run.status, AgentRunStatus::Running))
+        {
+            items.push(SelectionItem {
+                name: "Clear completed runs".to_string(),
+                description: Some("Remove finished runs from this list".to_string()),
+                actions: vec![Box::new(|tx: &AppEventSender| {
+                    tx.send(AppEvent::ClearCompletedAgentRuns);
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            });
+        }
+
+        items.push(SelectionItem {
+            name: "Close".to_string(),
+            actions: vec![Box::new(|tx: &AppEventSender| {
+                tx.send(AppEvent::AgentRunsOverlayClosed);
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        let mut params = SelectionViewParams {
+            title: Some("Background agent runs".to_string()),
+            subtitle: Some("Select a run to inspect logs or actions.".to_string()),
+            footer_hint: Some("Enter to inspect · Esc to close".into()),
+            items,
+            ..Default::default()
+        };
+        params.cancel_handler = Some(Box::new(|tx: &AppEventSender| {
+            tx.send(AppEvent::AgentRunsOverlayClosed);
+            true
+        }));
+
+        self.agent_runs_overlay_open = true;
+        self.chat_widget.show_selection_view(params);
+    }
+
+    fn describe_agent_run(&self, run: &ActiveAgentRun) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        let status = match run.status {
+            AgentRunStatus::Running => "running",
+            AgentRunStatus::Completed => "completed",
+            AgentRunStatus::Failed => "failed",
+            AgentRunStatus::Cancelled => "cancelled",
+        };
+        parts.push(format!("Status: {status}"));
+        let elapsed = Utc::now().signed_duration_since(run.started_at);
+        parts.push(format!(
+            "Elapsed: {}",
+            Self::format_duration(elapsed.num_seconds())
+        ));
+        if let Some(note) = run.last_note.as_ref() {
+            parts.push(format!("Last: {note}"));
+        }
+        parts.push(format!("Prompt: {}", run.prompt_preview));
+
+        if self.expanded_agent_runs.contains(&run.run_id) && !run.logs.is_empty() {
+            let recent: Vec<String> = run
+                .logs
+                .iter()
+                .rev()
+                .take(3)
+                .map(|entry| {
+                    let stream = match entry.stream {
+                        AgentRunLogStream::Info => "info",
+                        AgentRunLogStream::Stdout => "stdout",
+                        AgentRunLogStream::Stderr => "stderr",
+                    };
+                    let truncated = Self::truncate_line(&entry.message);
+                    format!("{stream}: {truncated}")
+                })
+                .collect();
+            parts.push(format!("Logs: {}", recent.join(" | ")));
+        }
+
+        parts.join(" • ")
+    }
+
+    fn show_agent_run_actions(&mut self, run_id: String) {
+        self.agent_runs_overlay_open = false;
+        let Some(run) = self
+            .active_agent_runs
+            .iter()
+            .find(|run| run.run_id == run_id)
+            .cloned()
+        else {
+            self.chat_widget
+                .add_error_message(format!("Agent run `{run_id}` not found."));
+            return;
+        };
+
+        let mut items: Vec<SelectionItem> = Vec::new();
+        items.push(SelectionItem {
+            name: "View transcript".to_string(),
+            description: Some("Dump recent stdout/stderr into the chat".to_string()),
+            actions: vec![Box::new({
+                let run_id = run.run_id.clone();
+                move |tx: &AppEventSender| {
+                    tx.send(AppEvent::ShowAgentRunTranscript {
+                        run_id: run_id.clone(),
+                    });
+                }
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        let is_expanded = self.expanded_agent_runs.contains(&run.run_id);
+        items.push(SelectionItem {
+            name: if is_expanded {
+                "Collapse details".to_string()
+            } else {
+                "Expand details".to_string()
+            },
+            actions: vec![Box::new({
+                let run_id = run.run_id.clone();
+                move |tx: &AppEventSender| {
+                    tx.send(AppEvent::ToggleAgentRunExpanded {
+                        run_id: run_id.clone(),
+                    });
+                }
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        items.push(SelectionItem {
+            name: if run.paused {
+                "Resume updates".to_string()
+            } else {
+                "Pause updates".to_string()
+            },
+            actions: vec![Box::new({
+                let run_id = run.run_id.clone();
+                move |tx: &AppEventSender| {
+                    tx.send(AppEvent::ToggleAgentRunPaused {
+                        run_id: run_id.clone(),
+                    });
+                }
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        if !matches!(run.status, AgentRunStatus::Running) {
+            items.push(SelectionItem {
+                name: "Remove from list".to_string(),
+                actions: vec![Box::new({
+                    let run_id = run.run_id.clone();
+                    move |tx: &AppEventSender| {
+                        tx.send(AppEvent::RemoveAgentRun {
+                            run_id: run_id.clone(),
+                        });
+                    }
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            });
+        }
+
+        items.push(SelectionItem {
+            name: "Back".to_string(),
+            actions: vec![Box::new(|tx: &AppEventSender| {
+                tx.send(AppEvent::ShowAgentRunsOverlay);
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        let mut params = SelectionViewParams {
+            title: Some(format!(
+                "Agent `{}` [{}]",
+                run.agent_name,
+                short_run_id(&run.run_id)
+            )),
+            subtitle: Some("Inspect logs or adjust monitoring.".to_string()),
+            footer_hint: Some("Enter to choose · Esc to return".into()),
+            items,
+            ..Default::default()
+        };
+        params.cancel_handler = Some(Box::new(|tx: &AppEventSender| {
+            tx.send(AppEvent::ShowAgentRunsOverlay);
+            true
+        }));
+
+        self.chat_widget.show_selection_view(params);
+    }
+
+    fn toggle_agent_run_expanded(&mut self, run_id: &str) {
+        if !self.expanded_agent_runs.insert(run_id.to_string()) {
+            self.expanded_agent_runs.remove(run_id);
+        }
+    }
+
+    fn toggle_agent_run_paused(&mut self, run_id: &str) {
+        if let Some(run) = self.find_agent_run_mut(run_id) {
+            run.paused = !run.paused;
+            if !run.paused
+                && let Some(last) = run.logs.back()
+            {
+                run.last_note = Some(Self::truncate_line(&last.message));
+            }
+        }
+        self.refresh_agent_status_line();
+    }
+
+    fn clear_completed_agent_runs(&mut self) {
+        self.active_agent_runs
+            .retain(|run| matches!(run.status, AgentRunStatus::Running));
+        self.expanded_agent_runs.retain(|run_id| {
+            self.active_agent_runs
+                .iter()
+                .any(|run| run.run_id == *run_id)
+        });
+        self.refresh_agent_status_line();
+    }
+
+    fn remove_agent_run(&mut self, run_id: &str) {
+        if let Some(pos) = self
+            .active_agent_runs
+            .iter()
+            .position(|run| run.run_id == run_id)
+        {
+            self.active_agent_runs.remove(pos);
+            self.expanded_agent_runs.remove(run_id);
+            self.refresh_agent_status_line();
+        }
+    }
+
+    fn show_agent_run_transcript(&mut self, run_id: &str) {
+        let Some(run) = self
+            .active_agent_runs
+            .iter()
+            .find(|run| run.run_id == run_id)
+        else {
+            self.chat_widget
+                .add_error_message(format!("Agent run `{run_id}` not found."));
+            return;
+        };
+
+        if run.logs.is_empty() {
+            self.chat_widget.add_info_message(
+                format!(
+                    "Agent `{}` [{}] has not produced any output yet.",
+                    run.agent_name,
+                    short_run_id(&run.run_id)
+                ),
+                None,
+            );
+            return;
+        }
+
+        let mut message = vec![format!(
+            "Agent `{}` [{}] transcript:",
+            run.agent_name,
+            short_run_id(&run.run_id)
+        )];
+        for entry in &run.logs {
+            let stream = match entry.stream {
+                AgentRunLogStream::Info => "info",
+                AgentRunLogStream::Stdout => "stdout",
+                AgentRunLogStream::Stderr => "stderr",
+            };
+            message.push(format!("[{stream}] {}", entry.message));
+        }
+        message.push(format!("Logs written to {}", run.log_path.display()));
+
+        self.chat_widget.add_info_message(message.join("\n"), None);
+    }
+
+    fn show_agent_run_transcript_by_index(&mut self, index: usize) {
+        if let Some(run) = self.active_agent_runs.get(index) {
+            let run_id = run.run_id.clone();
+            self.show_agent_run_transcript(&run_id);
+        } else {
+            self.chat_widget
+                .add_error_message(format!("No active agent assigned to Ctrl+{}.", index + 1));
+        }
+    }
+
+    fn persist_agent_run_summary(
+        &self,
+        agent_slug: String,
+        run_id: String,
+        summary: Option<String>,
+    ) {
+        if summary.is_none() {
+            return;
+        }
+        let Some(store) = self.agent_store.clone() else {
+            return;
+        };
+        tokio::spawn(async move {
+            let _ = task::spawn_blocking(move || -> Result<(), AnyError> {
+                store
+                    .annotate_run_summary(&agent_slug, &run_id, summary.clone())
+                    .ok();
+                if let Some(text) = summary {
+                    store.update_profile_summary(&agent_slug, Some(text)).ok();
+                }
+                Ok(())
+            })
+            .await;
+        });
+    }
+
+    fn format_duration(seconds: i64) -> String {
+        if seconds <= 0 {
+            return "0s".to_string();
+        }
+        let hours = seconds / 3600;
+        let minutes = (seconds % 3600) / 60;
+        let secs = seconds % 60;
+        if hours > 0 {
+            format!("{hours}h {minutes}m")
+        } else if minutes > 0 {
+            format!("{minutes}m {secs}s")
+        } else {
+            format!("{secs}s")
+        }
     }
 
     fn open_byok_manager(&mut self) {
@@ -2669,14 +4598,27 @@ impl App {
         match key_event {
             KeyEvent {
                 code: KeyCode::Char('t'),
-                modifiers: crossterm::event::KeyModifiers::CONTROL,
+                modifiers,
                 kind: KeyEventKind::Press,
                 ..
-            } => {
-                // Enter alternate screen and set viewport to full size.
-                let _ = tui.enter_alt_screen();
-                self.overlay = Some(Overlay::new_transcript(self.transcript_cells.clone()));
-                tui.frame_requester().schedule_frame();
+            } if modifiers.contains(KeyModifiers::CONTROL) => {
+                if !self.active_agent_runs.is_empty() && !modifiers.contains(KeyModifiers::SHIFT) {
+                    self.show_agent_runs_overlay();
+                } else {
+                    // Enter alternate screen and set viewport to full size.
+                    let _ = tui.enter_alt_screen();
+                    self.overlay = Some(Overlay::new_transcript(self.transcript_cells.clone()));
+                    tui.frame_requester().schedule_frame();
+                }
+            }
+            KeyEvent {
+                code: KeyCode::Char(ch @ '1'..='9'),
+                modifiers,
+                kind: KeyEventKind::Press,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) => {
+                let index = (ch as u8 - b'1') as usize;
+                self.show_agent_run_transcript_by_index(index);
             }
             // Esc primes/advances backtracking only in normal (not working) mode
             // with an empty composer. In any other state, forward Esc so the
@@ -2786,6 +4728,284 @@ fn spawn_toast_tick(sender: AppEventSender) {
     });
 }
 
+type SharedLogWriter = Arc<Mutex<tokio::io::BufWriter<tokio::fs::File>>>;
+
+async fn spawn_agent_run_process(
+    command_tokens: Vec<String>,
+    workdir: PathBuf,
+    run_id: String,
+    agent_slug: String,
+    agent_name: String,
+    prompt: String,
+    log_path: PathBuf,
+    store: AgentStore,
+    tx: AppEventSender,
+    run_context: AgentRunContext,
+) {
+    if command_tokens.is_empty() {
+        tx.send(AppEvent::AgentRunCompleted {
+            run_id,
+            agent_slug,
+            agent_name,
+            exit_code: None,
+            status: AgentRunStatus::Failed,
+            note: Some("no command configured".to_string()),
+        });
+        return;
+    }
+
+    let log_writer = match OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .await
+    {
+        Ok(file) => Some(Arc::new(Mutex::new(tokio::io::BufWriter::new(file)))),
+        Err(err) => {
+            warn!(path = %log_path.display(), error = ?err, "failed to open agent log");
+            None
+        }
+    };
+
+    if let Some(writer) = log_writer.as_ref() {
+        if let Err(err) = append_log_entry(
+            writer,
+            "info",
+            &format!("agent: {agent_name} ({agent_slug})"),
+        )
+        .await
+        {
+            warn!(?err, "failed to log agent identifier");
+        }
+        if !run_context.command_line.is_empty()
+            && let Err(err) = append_log_entry(
+                writer,
+                "info",
+                &format!("defaults.command: {}", run_context.command_line.join(" ")),
+            )
+            .await
+        {
+            warn!(?err, "failed to log default command");
+        }
+        if !run_context.enabled_tools.is_empty()
+            && let Err(err) = append_log_entry(
+                writer,
+                "info",
+                &format!("defaults.tools: {}", run_context.enabled_tools.join(", ")),
+            )
+            .await
+        {
+            warn!(?err, "failed to log enabled tools");
+        }
+        if let Some(mode) = run_context.approval_mode.as_deref()
+            && let Err(err) =
+                append_log_entry(writer, "info", &format!("defaults.approval_mode: {mode}")).await
+        {
+            warn!(?err, "failed to log approval defaults");
+        }
+        if let Some(mode) = run_context.sandbox_mode.as_deref()
+            && let Err(err) =
+                append_log_entry(writer, "info", &format!("defaults.sandbox_mode: {mode}")).await
+        {
+            warn!(?err, "failed to log sandbox defaults");
+        }
+        if !run_context.dangerous_flags.is_empty()
+            && let Err(err) = append_log_entry(
+                writer,
+                "info",
+                &format!(
+                    "dangerous_flags: {}",
+                    run_context.dangerous_flags.join(", ")
+                ),
+            )
+            .await
+        {
+            warn!(?err, "failed to log dangerous flags");
+        }
+        if let Err(err) = append_log_entry(writer, "info", &format!("prompt: {prompt}")).await {
+            warn!(?err, "failed to write prompt to agent log");
+        }
+    }
+
+    let mut parts = command_tokens;
+    let program = OsString::from(parts.remove(0));
+    let mut command = Command::new(program);
+    command.args(parts);
+    command.current_dir(&workdir);
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            warn!(?err, "failed to spawn agent exec process");
+            tx.send(AppEvent::AgentRunCompleted {
+                run_id,
+                agent_slug,
+                agent_name,
+                exit_code: None,
+                status: AgentRunStatus::Failed,
+                note: Some(format!("spawn error: {err}")),
+            });
+            return;
+        }
+    };
+
+    let stdout_task = child.stdout.take().map(|stdout| {
+        read_agent_stream(
+            stdout,
+            run_id.clone(),
+            agent_slug.clone(),
+            agent_name.clone(),
+            false,
+            tx.clone(),
+            log_writer.clone(),
+        )
+    });
+    let stderr_task = child.stderr.take().map(|stderr| {
+        read_agent_stream(
+            stderr,
+            run_id.clone(),
+            agent_slug.clone(),
+            agent_name.clone(),
+            true,
+            tx.clone(),
+            log_writer.clone(),
+        )
+    });
+
+    let status = match child.wait().await {
+        Ok(status) => status,
+        Err(err) => {
+            warn!(?err, "agent exec wait failed");
+            tx.send(AppEvent::AgentRunCompleted {
+                run_id,
+                agent_slug,
+                agent_name,
+                exit_code: None,
+                status: AgentRunStatus::Failed,
+                note: Some(format!("wait error: {err}")),
+            });
+            return;
+        }
+    };
+
+    if let Some(task) = stdout_task {
+        let _ = task.await;
+    }
+    if let Some(task) = stderr_task {
+        let _ = task.await;
+    }
+
+    let failed = !status.success();
+    let exit_code = status.code();
+
+    if let Some(writer) = log_writer.as_ref() {
+        let status_line = if failed {
+            exit_code
+                .map(|code| format!("status: failed (exit {code})"))
+                .unwrap_or_else(|| "status: failed".to_string())
+        } else {
+            "status: completed".to_string()
+        };
+        if let Err(err) = append_log_entry(writer, "info", &status_line).await {
+            warn!(?err, "failed to append status entry to agent log");
+        }
+    }
+
+    if let Err(err) = task::spawn_blocking({
+        let store = store.clone();
+        let agent_slug = agent_slug.clone();
+        let run_id = run_id.clone();
+        let log_path = log_path.clone();
+        move || -> Result<(), AnyError> {
+            let mut record = store.complete_run(&agent_slug, &run_id, exit_code, failed)?;
+            record.log_path = Some(log_path);
+            store.write_run_record(&agent_slug, &run_id, &record)?;
+            Ok(())
+        }
+    })
+    .await
+    {
+        warn!(?err, "failed to finalize agent run record");
+    }
+
+    let note = if failed {
+        exit_code
+            .map(|code| format!("exit {code}"))
+            .or_else(|| Some("process failed".to_string()))
+    } else {
+        Some("completed".to_string())
+    };
+
+    tx.send(AppEvent::AgentRunCompleted {
+        run_id,
+        agent_slug,
+        agent_name,
+        exit_code,
+        status: if failed {
+            AgentRunStatus::Failed
+        } else {
+            AgentRunStatus::Completed
+        },
+        note,
+    });
+}
+
+fn read_agent_stream<R>(
+    reader: R,
+    run_id: String,
+    agent_slug: String,
+    agent_name: String,
+    is_error: bool,
+    tx: AppEventSender,
+    log_writer: Option<SharedLogWriter>,
+) -> tokio::task::JoinHandle<()>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(reader).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let trimmed = line.trim_end_matches('\r').to_string();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Some(writer) = &log_writer {
+                let stream = if is_error { "stderr" } else { "stdout" };
+                if let Err(err) = append_log_entry(writer, stream, &trimmed).await {
+                    warn!(?err, "failed to append stream entry to agent log");
+                }
+            }
+            tx.send(AppEvent::AgentRunOutput {
+                run_id: run_id.clone(),
+                agent_slug: agent_slug.clone(),
+                agent_name: agent_name.clone(),
+                line: trimmed.clone(),
+                is_error,
+            });
+        }
+    })
+}
+
+async fn append_log_entry(
+    writer: &SharedLogWriter,
+    stream: &str,
+    line: &str,
+) -> Result<(), AnyError> {
+    let serialized = serialize_agent_log_record(stream, line)?;
+    let mut guard = writer.lock().await;
+    guard.write_all(serialized.as_bytes()).await?;
+    guard.write_all(b"\n").await?;
+    guard.flush().await?;
+    Ok(())
+}
+
+fn short_run_id(run_id: &str) -> String {
+    run_id.chars().take(8).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2804,6 +5024,7 @@ mod tests {
     use codex_core::protocol::SessionConfiguredEvent;
     use codex_protocol::ConversationId;
     use ratatui::prelude::Line;
+    use std::collections::VecDeque;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
@@ -2828,6 +5049,16 @@ mod tests {
             active_profile: None,
             settings: Settings::default(),
             byok_draft: None,
+            agent_store: None,
+            agent_profiles: Vec::new(),
+            agent_draft: None,
+            agent_draft_dirty: false,
+            agent_edit_dirty_flag: None,
+            agent_edit_return: AgentEditReturn::AgentManager,
+            active_agent_runs: Vec::new(),
+            agent_status_line: None,
+            agent_runs_overlay_open: false,
+            expanded_agent_runs: HashSet::new(),
             file_search,
             index_worker,
             index_status: None,
@@ -2878,6 +5109,70 @@ mod tests {
         assert!(is_valid_provider_id("custom-provider"));
         assert!(!is_valid_provider_id("Custom"));
         assert!(is_reserved_provider_id("openai"));
+    }
+
+    fn sample_run(id: &str) -> ActiveAgentRun {
+        ActiveAgentRun::new(
+            id.to_string(),
+            "runner".to_string(),
+            "Runner".to_string(),
+            "prompt".to_string(),
+            vec!["codex-agentic".to_string()],
+            std::env::temp_dir().join(format!("{id}.log")),
+        )
+    }
+
+    #[test]
+    fn toggle_agent_run_paused_round_trips_last_note() {
+        let mut app = make_test_app();
+        let mut run = sample_run("run-1");
+        run.logs = VecDeque::from([AgentRunLogEntry {
+            stream: AgentRunLogStream::Stdout,
+            message: "latest output".to_string(),
+            timestamp: Utc::now(),
+        }]);
+        app.active_agent_runs.push(run);
+
+        app.toggle_agent_run_paused("run-1");
+        assert!(app.active_agent_runs[0].paused);
+
+        app.toggle_agent_run_paused("run-1");
+        assert!(!app.active_agent_runs[0].paused);
+        assert_eq!(
+            app.active_agent_runs[0].last_note.as_deref(),
+            Some("latest output")
+        );
+    }
+
+    #[test]
+    fn clear_completed_agent_runs_removes_finished_entries() {
+        let mut app = make_test_app();
+        let running = sample_run("run-active");
+        let mut finished = sample_run("run-complete");
+        finished.status = AgentRunStatus::Completed;
+        app.active_agent_runs = vec![running, finished];
+        app.expanded_agent_runs.insert("run-complete".to_string());
+
+        app.clear_completed_agent_runs();
+
+        assert_eq!(app.active_agent_runs.len(), 1);
+        assert_eq!(app.active_agent_runs[0].run_id, "run-active");
+        assert!(app.expanded_agent_runs.is_empty());
+    }
+
+    #[test]
+    fn remove_agent_run_drops_requested_entry() {
+        let mut app = make_test_app();
+        app.active_agent_runs = vec![sample_run("run-a"), sample_run("run-b")];
+        app.expanded_agent_runs
+            .extend(["run-a".to_string(), "run-b".to_string()]);
+
+        app.remove_agent_run("run-b");
+
+        assert_eq!(app.active_agent_runs.len(), 1);
+        assert_eq!(app.active_agent_runs[0].run_id, "run-a");
+        assert_eq!(app.expanded_agent_runs.len(), 1);
+        assert!(app.expanded_agent_runs.contains("run-a"));
     }
 
     #[test]
@@ -2940,5 +5235,41 @@ mod tests {
         let (_, nth, prefill) = app.backtrack.pending.clone().expect("pending backtrack");
         assert_eq!(nth, 1);
         assert_eq!(prefill, "follow-up (edited)");
+    }
+
+    #[test]
+    fn agent_run_completion_queues_context_note() {
+        let mut app = make_test_app();
+        let run_id = "run-complete-test".to_string();
+        let agent_slug = "developer".to_string();
+        let agent_name = "Developer".to_string();
+        let prompt_preview = "Investigate primes".to_string();
+        let command_line = vec!["codex-agentic".to_string(), "exec".to_string()];
+        let log_path = PathBuf::from("/tmp/agent.log");
+        let run = ActiveAgentRun::new(
+            run_id.clone(),
+            agent_slug.clone(),
+            agent_name.clone(),
+            prompt_preview,
+            command_line,
+            log_path,
+        );
+        app.active_agent_runs.push(run);
+
+        app.on_agent_run_completed(
+            run_id,
+            agent_slug,
+            agent_name,
+            Some(0),
+            AgentRunStatus::Completed,
+            Some("Generated script".to_string()),
+        );
+
+        let notes = app.chat_widget.pending_context_notes_for_test();
+        assert_eq!(notes.len(), 1, "expected a single queued context note");
+        assert!(
+            notes[0].contains("Background agent"),
+            "context note missing summary: {notes:?}"
+        );
     }
 }

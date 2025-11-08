@@ -114,6 +114,7 @@ pub(crate) struct ChatComposer {
     context_window_percent: Option<i64>,
     index_status_line: Option<String>,
     rate_limit_summaries: Vec<String>,
+    agent_status_line: Option<String>,
 }
 
 /// Popup state – at most one can be visible at any time.
@@ -158,6 +159,7 @@ impl ChatComposer {
             footer_hint_override: None,
             context_window_percent: None,
             index_status_line: None,
+            agent_status_line: None,
             rate_limit_summaries: Vec::new(),
         };
         // Apply configuration via the setter to keep side-effects centralized.
@@ -1389,6 +1391,7 @@ impl ChatComposer {
             is_task_running: self.is_task_running,
             context_window_percent: self.context_window_percent,
             index_status: self.index_status_line.clone(),
+            agents_status: self.agent_status_line.clone(),
             rate_limit_summaries: self.rate_limit_summaries.clone(),
         }
     }
@@ -1535,6 +1538,12 @@ impl ChatComposer {
     pub(crate) fn set_rate_limit_summaries(&mut self, summaries: Vec<String>) {
         if self.rate_limit_summaries != summaries {
             self.rate_limit_summaries = summaries;
+        }
+    }
+
+    pub(crate) fn set_agent_status_line(&mut self, status: Option<String>) {
+        if self.agent_status_line != status {
+            self.agent_status_line = status;
         }
     }
 
