@@ -1539,6 +1539,30 @@ fn model_popup_lists_custom_provider_models() {
 }
 
 #[test]
+fn slash_index_build_triggers_start_index_build_event() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
+
+    chat.dispatch_command(SlashCommand::IndexBuild, None);
+
+    match rx.try_recv() {
+        Ok(AppEvent::StartIndexBuild) => {}
+        other => panic!("expected StartIndexBuild event, got {other:?}"),
+    }
+}
+
+#[test]
+fn slash_memory_opens_memory_manager() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
+
+    chat.dispatch_command(SlashCommand::Memory, None);
+
+    match rx.try_recv() {
+        Ok(AppEvent::OpenMemoryManager) => {}
+        other => panic!("expected OpenMemoryManager event, got {other:?}"),
+    }
+}
+
+#[test]
 fn feedback_selection_popup_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
 

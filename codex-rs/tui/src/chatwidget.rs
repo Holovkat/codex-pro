@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -116,15 +117,21 @@ use crate::streaming::controller::StreamController;
 use std::path::Path;
 
 use chrono::Local;
+use codex_agentic_core::provider::DEFAULT_OPENAI_PROVIDER_ID;
+use codex_agentic_core::settings;
+use codex_agentic_core::settings::CustomProvider;
 use codex_common::approval_presets::ApprovalPreset;
 use codex_common::approval_presets::builtin_approval_presets;
 use codex_common::model_presets::ModelPreset;
+use codex_common::model_presets::ReasoningEffortPreset;
 use codex_common::model_presets::builtin_model_presets;
 use codex_core::AuthManager;
 use codex_core::ConversationManager;
+use codex_core::config_types::ProviderKind;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
 use codex_core::protocol_config_types::ReasoningEffort as ReasoningEffortConfig;
+use codex_core::protocol_config_types::ReasoningEffort;
 use codex_file_search::FileMatch;
 use codex_protocol::plan_tool::UpdatePlanArgs;
 use strum::IntoEnumIterator;
@@ -1825,8 +1832,7 @@ impl ChatWidget {
     /// a second popup is shown to choose the reasoning effort.
     pub(crate) fn open_model_popup(&mut self) {
         let current_model = self.config.model.clone();
-        let auth_mode = self.auth_manager.auth().map(|auth| auth.mode);
-        let presets: Vec<ModelPreset> = builtin_model_presets(auth_mode);
+        let presets = self.collect_model_presets();
 
         let mut items: Vec<SelectionItem> = Vec::new();
         for preset in presets.into_iter() {
@@ -1860,6 +1866,120 @@ impl ChatWidget {
             items,
             ..Default::default()
         });
+    }
+
+    fn collect_model_presets(&self) -> Vec<ModelPreset> {
+        let auth_mode = self.auth_manager.auth().map(|auth| auth.mode);
+        let mut presets = builtin_model_presets(auth_mode);
+        presets.extend(self.custom_model_presets());
+        presets.sort_by(|lhs, rhs| {
+            let default_cmp = rhs.is_default.cmp(&lhs.is_default);
+            if default_cmp != Ordering::Equal {
+                return default_cmp;
+            }
+            let provider_cmp = lhs
+                .provider_label
+                .as_deref()
+                .unwrap_or("")
+                .cmp(rhs.provider_label.as_deref().unwrap_or(""));
+            if provider_cmp != Ordering::Equal {
+                return provider_cmp;
+            }
+            lhs.display_name.cmp(&rhs.display_name)
+        });
+        presets.dedup_by(|lhs, rhs| lhs.id == rhs.id);
+        presets
+    }
+
+    fn custom_model_presets(&self) -> Vec<ModelPreset> {
+        let settings = settings::global();
+        let mut presets = Vec::new();
+        let current_model = self.config.model.as_str();
+        let current_provider = self.config.model_provider_id.as_str();
+
+        for (provider_id, provider) in settings.custom_providers() {
+            if provider_id == DEFAULT_OPENAI_PROVIDER_ID {
+                continue;
+            }
+
+            let mut models: Vec<String> = provider
+                .cached_models
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|model| !model.trim().is_empty())
+                .collect();
+
+            if let Some(default_model) = provider.default_model.as_ref()
+                && !default_model.trim().is_empty()
+                && !models.iter().any(|model| model == default_model)
+            {
+                models.push(default_model.trim().to_string());
+            }
+
+            if provider_id == current_provider
+                && !current_model.is_empty()
+                && !models.iter().any(|model| model == current_model)
+            {
+                models.push(current_model.to_string());
+            }
+
+            models.sort();
+            models.dedup();
+
+            if models.is_empty() {
+                continue;
+            }
+
+            let provider_display = if provider.name.trim().is_empty() {
+                provider_id.clone()
+            } else {
+                provider.name.clone()
+            };
+
+            let supported = reasoning_presets_for_kind(provider.provider_kind);
+            let default_effort = supported
+                .first()
+                .map(|preset| preset.effort)
+                .unwrap_or(ReasoningEffort::Minimal);
+            let description_base = describe_custom_provider(provider);
+
+            for model in models.iter() {
+                let is_current = provider_id == current_provider && model.as_str() == current_model;
+                let mut description_parts: Vec<String> = Vec::new();
+                if !description_base.is_empty() {
+                    description_parts.push(description_base.clone());
+                }
+                if provider
+                    .default_model
+                    .as_ref()
+                    .map(|default_model| default_model == model)
+                    .unwrap_or(false)
+                {
+                    description_parts.push("Configured as default model".to_string());
+                }
+                if let Some(last_refresh) = provider.last_model_refresh.as_ref()
+                    && !last_refresh.trim().is_empty()
+                {
+                    description_parts.push(format!("Cached models refreshed {last_refresh}"));
+                }
+
+                let preset = ModelPreset {
+                    id: format!("{provider_id}::{model}"),
+                    model: model.clone(),
+                    display_name: format!("{model} ({provider_display})"),
+                    description: description_parts.join(" • "),
+                    default_reasoning_effort: default_effort,
+                    supported_reasoning_efforts: supported.clone(),
+                    is_default: is_current,
+                    provider_id: Some(provider_id.clone()),
+                    provider_label: Some(provider_display.clone()),
+                };
+                presets.push(preset);
+            }
+        }
+
+        presets
     }
 
     /// Open a popup to choose the reasoning effort (stage 2) for the given model.
@@ -1934,11 +2054,14 @@ impl ChatWidget {
             }
             let model_for_action = model_slug.clone();
             let effort_for_action = choice.stored;
-            let provider_for_action = self.config.model_provider_id.clone();
+            let provider_for_action = preset
+                .provider_id
+                .clone()
+                .or_else(|| Some(self.config.model_provider_id.clone()));
             let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
                 tx.send(AppEvent::CodexOp(Op::OverrideTurnContext {
                     cwd: None,
-                    provider_id: Some(provider_for_action.clone()),
+                    provider_id: provider_for_action.clone(),
                     approval_policy: None,
                     sandbox_policy: None,
                     model: Some(model_for_action.clone()),
@@ -2752,6 +2875,55 @@ pub(crate) fn refresh_model_metadata(config: &mut Config) {
         config.model_max_output_tokens = None;
         config.model_auto_compact_token_limit = None;
     }
+}
+
+fn reasoning_presets_for_kind(kind: ProviderKind) -> Vec<ReasoningEffortPreset> {
+    match kind {
+        ProviderKind::OpenAiResponses | ProviderKind::AnthropicClaude => vec![
+            ReasoningEffortPreset {
+                effort: ReasoningEffort::Minimal,
+                description: "Fastest responses with limited reasoning".to_string(),
+            },
+            ReasoningEffortPreset {
+                effort: ReasoningEffort::Low,
+                description: "Balances latency with moderate reasoning depth".to_string(),
+            },
+            ReasoningEffortPreset {
+                effort: ReasoningEffort::Medium,
+                description: "Recommended balance of speed and reasoning".to_string(),
+            },
+            ReasoningEffortPreset {
+                effort: ReasoningEffort::High,
+                description: "Maximize reasoning depth for complex tasks".to_string(),
+            },
+        ],
+        ProviderKind::Ollama => vec![ReasoningEffortPreset {
+            effort: ReasoningEffort::Minimal,
+            description: "Fast local generation (recommended)".to_string(),
+        }],
+    }
+}
+
+fn describe_custom_provider(provider: &CustomProvider) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    match provider.provider_kind {
+        ProviderKind::OpenAiResponses => parts.push("OpenAI-compatible endpoint".to_string()),
+        ProviderKind::Ollama => parts.push("Local Ollama provider".to_string()),
+        ProviderKind::AnthropicClaude => {
+            parts.push("Anthropic Claude-compatible endpoint".to_string())
+        }
+    }
+    if let Some(url) = provider.base_url.as_deref()
+        && !url.trim().is_empty()
+    {
+        parts.push(url.trim().to_string());
+    }
+    if let Some(models) = provider.cached_models.as_ref()
+        && !models.is_empty()
+    {
+        parts.push(format!("Cached models: {}", models.len()));
+    }
+    parts.join(" • ")
 }
 
 #[cfg(test)]
