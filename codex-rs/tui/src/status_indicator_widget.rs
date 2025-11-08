@@ -16,6 +16,7 @@ use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::exec_cell::spinner;
 use crate::key_hint;
+use crate::render::renderable::Renderable;
 use crate::shimmer::shimmer_spans;
 use crate::tui::FrameRequester;
 
@@ -60,10 +61,6 @@ impl StatusIndicatorWidget {
             app_event_tx,
             frame_requester,
         }
-    }
-
-    pub fn desired_height(&self, _width: u16) -> u16 {
-        1
     }
 
     pub(crate) fn interrupt(&self) {
@@ -128,6 +125,16 @@ impl StatusIndicatorWidget {
 
     pub fn elapsed_seconds(&self) -> u64 {
         self.elapsed_seconds_at(Instant::now())
+    }
+}
+
+impl Renderable for StatusIndicatorWidget {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        self.render_ref(area, buf);
+    }
+
+    fn desired_height(&self, _width: u16) -> u16 {
+        1
     }
 }
 

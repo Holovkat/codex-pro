@@ -27,7 +27,6 @@ pub enum ProviderKind {
     AnthropicClaude,
 }
 
-
 const fn default_postprocess_reasoning() -> bool {
     true
 }

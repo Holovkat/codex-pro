@@ -1,9 +1,9 @@
-use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use codex_core::ModelProviderInfo;
 use codex_core::config::Config;
 use codex_core::config::types::Notifications;
 use codex_core::get_model_info;
@@ -12,7 +12,6 @@ use codex_core::git_info::local_git_branches;
 use codex_core::model_family::derive_default_model_family;
 use codex_core::model_family::find_family_for_model;
 use codex_core::project_doc::DEFAULT_PROJECT_DOC_FILENAME;
-use codex_core::protocol::AgentMessageContentDeltaEvent;
 use codex_core::protocol::AgentMessageDeltaEvent;
 use codex_core::protocol::AgentMessageEvent;
 use codex_core::protocol::AgentReasoningDeltaEvent;
@@ -37,8 +36,6 @@ use codex_core::protocol::MemoryPreviewEvent;
 use codex_core::protocol::Op;
 use codex_core::protocol::PatchApplyBeginEvent;
 use codex_core::protocol::RateLimitSnapshot;
-use codex_core::protocol::ReasoningContentDeltaEvent;
-use codex_core::protocol::ReasoningRawContentDeltaEvent;
 use codex_core::protocol::ReviewRequest;
 use codex_core::protocol::StreamErrorEvent;
 use codex_core::protocol::TaskCompleteEvent;
@@ -62,15 +59,11 @@ use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
 use rand::Rng;
 use ratatui::buffer::Buffer;
-use ratatui::layout::Constraint;
-use ratatui::layout::Layout;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
-use ratatui::widgets::Widget;
-use ratatui::widgets::WidgetRef;
 use ratatui::widgets::Wrap;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::debug;
@@ -101,10 +94,15 @@ use crate::history_cell::MemorySuggestionEntry;
 use crate::markdown::append_markdown;
 #[cfg(target_os = "windows")]
 use crate::onboarding::WSL_INSTRUCTIONS;
+use crate::render::Insets;
 use crate::render::renderable::ColumnRenderable;
+use crate::render::renderable::FlexRenderable;
 use crate::render::renderable::Renderable;
+use crate::render::renderable::RenderableExt;
+use crate::render::renderable::RenderableItem;
 use crate::slash_command::SlashCommand;
 use crate::status::RateLimitSnapshotDisplay;
+use crate::status::compose_rate_limit_footer;
 use crate::text_formatting::truncate_text;
 use crate::tui::FrameRequester;
 mod interrupts;
@@ -118,22 +116,15 @@ use crate::streaming::controller::StreamController;
 use std::path::Path;
 
 use chrono::Local;
-use codex_agentic_core::provider::DEFAULT_OPENAI_PROVIDER_ID;
-use codex_agentic_core::settings;
-use codex_agentic_core::settings::CustomProvider;
 use codex_common::approval_presets::ApprovalPreset;
 use codex_common::approval_presets::builtin_approval_presets;
 use codex_common::model_presets::ModelPreset;
-use codex_common::model_presets::ReasoningEffortPreset;
 use codex_common::model_presets::builtin_model_presets;
 use codex_core::AuthManager;
 use codex_core::ConversationManager;
-use codex_core::ModelProviderInfo;
-use codex_core::config_types::ProviderKind;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
 use codex_core::protocol_config_types::ReasoningEffort as ReasoningEffortConfig;
-use codex_core::protocol_config_types::ReasoningEffort;
 use codex_file_search::FileMatch;
 use codex_protocol::plan_tool::UpdatePlanArgs;
 use strum::IntoEnumIterator;
@@ -283,12 +274,11 @@ pub(crate) struct ChatWidget {
     queued_user_messages: VecDeque<UserMessage>,
     // Pending notification to show when unfocused on next Draw
     pending_notification: Option<Notification>,
+    pending_context_notes: VecDeque<String>,
     // Simple review mode flag; used to adjust layout and banners.
     is_review_mode: bool,
     // Whether to add a final message separator after the last message
     needs_final_message_separator: bool,
-    // Context snippets queued to be injected into the next user turn.
-    pending_context_notes: VecDeque<String>,
 
     last_rendered_width: std::cell::Cell<Option<usize>>,
     // Feedback sink for /feedback
@@ -311,6 +301,15 @@ impl From<String> for UserMessage {
     }
 }
 
+impl From<&str> for UserMessage {
+    fn from(text: &str) -> Self {
+        Self {
+            text: text.to_string(),
+            image_paths: Vec::new(),
+        }
+    }
+}
+
 fn create_initial_user_message(text: String, image_paths: Vec<PathBuf>) -> Option<UserMessage> {
     if text.is_empty() && image_paths.is_empty() {
         None
@@ -321,7 +320,6 @@ fn create_initial_user_message(text: String, image_paths: Vec<PathBuf>) -> Optio
 
 impl ChatWidget {
     const MAX_PENDING_CONTEXT_NOTES: usize = 8;
-
     fn flush_answer_stream_with_separator(&mut self) {
         if let Some(mut controller) = self.stream_controller.take()
             && let Some(cell) = controller.finalize()
@@ -509,7 +507,7 @@ impl ChatWidget {
             );
 
             let display = crate::status::rate_limit_snapshot_display(&snapshot, Local::now());
-            let summaries = crate::status::compose_rate_limit_footer(Some(&display));
+            let summaries = compose_rate_limit_footer(Some(&display));
             self.bottom_pane.set_rate_limit_summaries(summaries);
             self.rate_limit_snapshot = Some(display);
 
@@ -738,9 +736,7 @@ impl ChatWidget {
         if self.retry_status_header.is_none() {
             self.retry_status_header = Some(self.current_status_header.clone());
         }
-        self.set_status_header(message.clone());
-        self.add_to_history(history_cell::new_stream_error_event(message));
-        self.request_redraw();
+        self.set_status_header(message);
     }
 
     /// Periodic tick to commit at most one queued line to history with a small delay,
@@ -981,27 +977,6 @@ impl ChatWidget {
         }
     }
 
-    fn layout_areas(&self, area: Rect) -> [Rect; 3] {
-        let bottom_min = self.bottom_pane.desired_height(area.width).min(area.height);
-        let remaining = area.height.saturating_sub(bottom_min);
-
-        let active_desired = self
-            .active_cell
-            .as_ref()
-            .map_or(0, |c| c.desired_height(area.width) + 1);
-        let active_height = active_desired.min(remaining);
-        // Note: no header area; remaining is not used beyond computing active height.
-
-        let header_height = 0u16;
-
-        Layout::vertical([
-            Constraint::Length(header_height),
-            Constraint::Length(active_height),
-            Constraint::Min(bottom_min),
-        ])
-        .areas(area)
-    }
-
     pub(crate) fn new(
         common: ChatWidgetInit,
         conversation_manager: Arc<ConversationManager>,
@@ -1056,9 +1031,9 @@ impl ChatWidget {
             show_welcome_banner: true,
             suppress_session_configured_redraw: false,
             pending_notification: None,
+            pending_context_notes: VecDeque::new(),
             is_review_mode: false,
             needs_final_message_separator: false,
-            pending_context_notes: VecDeque::new(),
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
             current_rollout_path: None,
@@ -1123,21 +1098,13 @@ impl ChatWidget {
             show_welcome_banner: true,
             suppress_session_configured_redraw: true,
             pending_notification: None,
+            pending_context_notes: VecDeque::new(),
             is_review_mode: false,
             needs_final_message_separator: false,
-            pending_context_notes: VecDeque::new(),
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
             current_rollout_path: None,
         }
-    }
-
-    pub fn desired_height(&self, width: u16) -> u16 {
-        self.bottom_pane.desired_height(width)
-            + self
-                .active_cell
-                .as_ref()
-                .map_or(0, |c| c.desired_height(width) + 1)
     }
 
     pub(crate) fn handle_key_event(&mut self, key_event: KeyEvent) {
@@ -1190,12 +1157,7 @@ impl ChatWidget {
                             text,
                             image_paths: self.bottom_pane.take_recent_submission_images(),
                         };
-                        if self.bottom_pane.is_task_running() {
-                            self.queued_user_messages.push_back(user_message);
-                            self.refresh_queued_user_messages();
-                        } else {
-                            self.submit_user_message(user_message);
-                        }
+                        self.queue_user_message(user_message);
                     }
                     InputResult::Command { command, args } => {
                         self.dispatch_command(command, args);
@@ -1360,19 +1322,6 @@ impl ChatWidget {
             SlashCommand::Agent => {
                 self.handle_agent_command(args);
             }
-            SlashCommand::Rollout => {
-                if let Some(path) = self.current_rollout_path.as_ref() {
-                    self.add_info_message(format!("Rollout file: {}", path.display()), None);
-                } else {
-                    self.add_info_message(
-                        "No rollout file is available yet for this session.".to_string(),
-                        None,
-                    );
-                }
-            }
-            SlashCommand::Byok => {
-                self.app_event_tx.send(AppEvent::OpenByokManager);
-            }
             SlashCommand::Quit | SlashCommand::Exit => {
                 self.request_exit();
             }
@@ -1414,10 +1363,22 @@ impl ChatWidget {
             SlashCommand::Mcp => {
                 self.add_mcp_output();
             }
+            SlashCommand::Byok => {
+                self.app_event_tx.send(AppEvent::OpenByokManager);
+            }
             SlashCommand::Memory => {
                 self.app_event_tx.send(AppEvent::OpenMemoryManager);
             }
-            #[cfg(debug_assertions)]
+            SlashCommand::Rollout => {
+                if let Some(path) = self.rollout_path() {
+                    self.add_info_message(
+                        format!("Current rollout path: {}", path.display()),
+                        None,
+                    );
+                } else {
+                    self.add_info_message("Rollout path is not available yet.".to_string(), None);
+                }
+            }
             SlashCommand::TestApproval => {
                 use codex_core::protocol::EventMsg;
                 use std::collections::HashMap;
@@ -1500,6 +1461,15 @@ impl ChatWidget {
         self.app_event_tx.send(AppEvent::InsertHistoryCell(cell));
     }
 
+    fn queue_user_message(&mut self, user_message: UserMessage) {
+        if self.bottom_pane.is_task_running() {
+            self.queued_user_messages.push_back(user_message);
+            self.refresh_queued_user_messages();
+        } else {
+            self.submit_user_message(user_message);
+        }
+    }
+
     fn submit_user_message(&mut self, user_message: UserMessage) {
         let UserMessage { text, image_paths } = user_message;
         if text.is_empty() && image_paths.is_empty() {
@@ -1507,6 +1477,7 @@ impl ChatWidget {
         }
 
         let mut items: Vec<UserInput> = Vec::new();
+        items.extend(self.drain_context_note_inputs());
 
         // Special-case: "!cmd" executes a local shell command instead of sending to the model.
         if let Some(stripped) = text.strip_prefix('!') {
@@ -1525,8 +1496,6 @@ impl ChatWidget {
             });
             return;
         }
-
-        items.extend(self.drain_context_note_inputs());
 
         if !text.is_empty() {
             items.push(UserInput::Text { text: text.clone() });
@@ -1621,11 +1590,7 @@ impl ChatWidget {
     fn dispatch_event_msg(&mut self, id: Option<String>, msg: EventMsg, from_replay: bool) {
         match msg {
             EventMsg::AgentMessageDelta(_)
-            | EventMsg::AgentMessageContentDelta(_)
             | EventMsg::AgentReasoningDelta(_)
-            | EventMsg::ReasoningContentDelta(_)
-            | EventMsg::AgentReasoningRawContentDelta(_)
-            | EventMsg::ReasoningRawContentDelta(_)
             | EventMsg::ExecCommandOutputDelta(_) => {}
             _ => {
                 tracing::trace!("handle_codex_event: {:?}", msg);
@@ -1638,17 +1603,10 @@ impl ChatWidget {
             EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta }) => {
                 self.on_agent_message_delta(delta)
             }
-            EventMsg::AgentMessageContentDelta(AgentMessageContentDeltaEvent { delta, .. }) => {
-                self.on_agent_message_delta(delta)
-            }
             EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent { delta })
-            | EventMsg::ReasoningContentDelta(ReasoningContentDeltaEvent { delta, .. })
             | EventMsg::AgentReasoningRawContentDelta(AgentReasoningRawContentDeltaEvent {
                 delta,
-            })
-            | EventMsg::ReasoningRawContentDelta(ReasoningRawContentDeltaEvent { delta, .. }) => {
-                self.on_agent_reasoning_delta(delta)
-            }
+            }) => self.on_agent_reasoning_delta(delta),
             EventMsg::AgentReasoning(AgentReasoningEvent { .. }) => self.on_agent_reasoning_final(),
             EventMsg::AgentReasoningRawContent(AgentReasoningRawContentEvent { text }) => {
                 self.on_agent_reasoning_delta(text);
@@ -1663,8 +1621,8 @@ impl ChatWidget {
                 self.set_token_info(ev.info);
                 self.on_rate_limit_snapshot(ev.rate_limits);
             }
-            EventMsg::Error(ErrorEvent { message }) => self.on_error(message),
             EventMsg::Warning(WarningEvent { message }) => self.on_warning(message),
+            EventMsg::Error(ErrorEvent { message }) => self.on_error(message),
             EventMsg::TurnAborted(ev) => match ev.reason {
                 TurnAbortReason::Interrupted => {
                     self.on_interrupted_turn(ev.reason);
@@ -1684,7 +1642,6 @@ impl ChatWidget {
             EventMsg::ApplyPatchApprovalRequest(ev) => {
                 self.on_apply_patch_approval_request(id.unwrap_or_default(), ev)
             }
-            EventMsg::MemoryPreview(event) => self.on_memory_preview(event),
             EventMsg::ExecCommandBegin(ev) => self.on_exec_command_begin(ev),
             EventMsg::ExecCommandOutputDelta(delta) => self.on_exec_command_output_delta(delta),
             EventMsg::PatchApplyBegin(ev) => self.on_patch_apply_begin(ev),
@@ -1698,6 +1655,7 @@ impl ChatWidget {
             EventMsg::GetHistoryEntryResponse(ev) => self.on_get_history_entry_response(ev),
             EventMsg::McpListToolsResponse(ev) => self.on_list_mcp_tools(ev),
             EventMsg::ListCustomPromptsResponse(ev) => self.on_list_custom_prompts(ev),
+            EventMsg::MemoryPreview(preview) => self.on_memory_preview(preview),
             EventMsg::ShutdownComplete => self.on_shutdown_complete(),
             EventMsg::TurnDiff(TurnDiffEvent { unified_diff }) => self.on_turn_diff(unified_diff),
             EventMsg::DeprecationNotice(ev) => self.on_deprecation_notice(ev),
@@ -1718,7 +1676,10 @@ impl ChatWidget {
             EventMsg::ExitedReviewMode(review) => self.on_exited_review_mode(review),
             EventMsg::RawResponseItem(_)
             | EventMsg::ItemStarted(_)
-            | EventMsg::ItemCompleted(_) => {}
+            | EventMsg::ItemCompleted(_)
+            | EventMsg::AgentMessageContentDelta(_)
+            | EventMsg::ReasoningContentDelta(_)
+            | EventMsg::ReasoningRawContentDelta(_) => {}
         }
     }
 
@@ -1864,7 +1825,8 @@ impl ChatWidget {
     /// a second popup is shown to choose the reasoning effort.
     pub(crate) fn open_model_popup(&mut self) {
         let current_model = self.config.model.clone();
-        let presets = self.collect_model_presets();
+        let auth_mode = self.auth_manager.auth().map(|auth| auth.mode);
+        let presets: Vec<ModelPreset> = builtin_model_presets(auth_mode);
 
         let mut items: Vec<SelectionItem> = Vec::new();
         for preset in presets.into_iter() {
@@ -1900,124 +1862,9 @@ impl ChatWidget {
         });
     }
 
-    fn collect_model_presets(&self) -> Vec<ModelPreset> {
-        let auth_mode = self.auth_manager.auth().map(|auth| auth.mode);
-        let mut presets = builtin_model_presets(auth_mode);
-        presets.extend(self.custom_model_presets());
-        presets.sort_by(|lhs, rhs| {
-            let default_cmp = rhs.is_default.cmp(&lhs.is_default);
-            if default_cmp != Ordering::Equal {
-                return default_cmp;
-            }
-            let provider_cmp = lhs
-                .provider_label
-                .as_deref()
-                .unwrap_or("")
-                .cmp(rhs.provider_label.as_deref().unwrap_or(""));
-            if provider_cmp != Ordering::Equal {
-                return provider_cmp;
-            }
-            lhs.display_name.cmp(&rhs.display_name)
-        });
-        presets.dedup_by(|lhs, rhs| lhs.id == rhs.id);
-        presets
-    }
-
-    fn custom_model_presets(&self) -> Vec<ModelPreset> {
-        let settings = settings::global();
-        let mut presets = Vec::new();
-        let current_model = self.config.model.as_str();
-        let current_provider = self.config.model_provider_id.as_str();
-
-        for (provider_id, provider) in settings.custom_providers() {
-            if provider_id == DEFAULT_OPENAI_PROVIDER_ID {
-                continue;
-            }
-
-            let mut models: Vec<String> = provider
-                .cached_models
-                .clone()
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|model| !model.trim().is_empty())
-                .collect();
-
-            if let Some(default_model) = provider.default_model.as_ref()
-                && !default_model.trim().is_empty()
-                && !models.iter().any(|model| model == default_model)
-            {
-                models.push(default_model.trim().to_string());
-            }
-
-            if provider_id == current_provider
-                && !current_model.is_empty()
-                && !models.iter().any(|model| model == current_model)
-            {
-                models.push(current_model.to_string());
-            }
-
-            models.sort();
-            models.dedup();
-
-            if models.is_empty() {
-                continue;
-            }
-
-            let provider_display = if provider.name.trim().is_empty() {
-                provider_id.clone()
-            } else {
-                provider.name.clone()
-            };
-
-            let supported = reasoning_presets_for_kind(provider.provider_kind);
-            let default_effort = supported
-                .first()
-                .map(|preset| preset.effort)
-                .unwrap_or(ReasoningEffort::Minimal);
-            let description_base = describe_custom_provider(provider);
-
-            for model in models.iter() {
-                let is_current = provider_id == current_provider && model.as_str() == current_model;
-                let mut description_parts: Vec<String> = Vec::new();
-                if !description_base.is_empty() {
-                    description_parts.push(description_base.clone());
-                }
-                if provider
-                    .default_model
-                    .as_ref()
-                    .map(|default_model| default_model == model)
-                    .unwrap_or(false)
-                {
-                    description_parts.push("Configured as default model".to_string());
-                }
-                if let Some(last_refresh) = provider.last_model_refresh.as_ref()
-                    && !last_refresh.trim().is_empty()
-                {
-                    description_parts.push(format!("Cached models refreshed {last_refresh}"));
-                }
-
-                let preset = ModelPreset {
-                    id: format!("{provider_id}::{model}"),
-                    model: model.clone(),
-                    display_name: format!("{model} ({provider_display})"),
-                    description: description_parts.join(" • "),
-                    default_reasoning_effort: default_effort,
-                    supported_reasoning_efforts: supported.clone(),
-                    is_default: is_current,
-                    provider_id: Some(provider_id.clone()),
-                    provider_label: Some(provider_display.clone()),
-                };
-                presets.push(preset);
-            }
-        }
-
-        presets
-    }
-
     /// Open a popup to choose the reasoning effort (stage 2) for the given model.
     pub(crate) fn open_reasoning_popup(&mut self, preset: ModelPreset) {
         let default_effort: ReasoningEffortConfig = preset.default_reasoning_effort;
-        let provider_id = preset.provider_id.clone();
         let supported = preset.supported_reasoning_efforts;
 
         struct EffortChoice {
@@ -2075,25 +1922,23 @@ impl ChatWidget {
                         .map(|option| option.description.to_string())
                 })
                 .filter(|text| !text.is_empty());
-
-            let warning = "⚠ High reasoning effort can quickly consume Plus plan rate limits.";
-            let show_warning =
-                preset.model == "gpt-5-codex" && effort == ReasoningEffortConfig::High;
-            if show_warning {
-                let warning_text = warning.to_string();
-                description = Some(match description {
-                    Some(text) if !text.is_empty() => format!("{text}\n{warning_text}"),
-                    _ => warning_text,
-                });
+            if preset.model == "gpt-5-codex" && effort == ReasoningEffortConfig::High {
+                const WARNING: &str =
+                    "⚠ High reasoning effort can quickly consume Plus plan rate limits.";
+                description = Some(
+                    description
+                        .take()
+                        .filter(|text| !text.is_empty())
+                        .map_or_else(|| WARNING.to_string(), |text| format!("{text}\n{WARNING}")),
+                );
             }
-
             let model_for_action = model_slug.clone();
             let effort_for_action = choice.stored;
-            let provider_id_for_action = provider_id.clone();
+            let provider_for_action = self.config.model_provider_id.clone();
             let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
                 tx.send(AppEvent::CodexOp(Op::OverrideTurnContext {
                     cwd: None,
-                    provider_id: provider_id_for_action.clone(),
+                    provider_id: Some(provider_for_action.clone()),
                     approval_policy: None,
                     sandbox_policy: None,
                     model: Some(model_for_action.clone()),
@@ -2121,14 +1966,14 @@ impl ChatWidget {
                 is_current: is_current_model && choice.stored == highlight_choice,
                 actions,
                 dismiss_on_select: true,
-                search_value: Some(choice.display.to_string()),
                 ..Default::default()
             });
         }
 
-        let header_text = format!("Select Reasoning Level for {model_slug}");
-        let header_line = Line::from(vec![header_text.bold()]);
-        let header = ColumnRenderable::new([Box::new(header_line) as Box<dyn Renderable>]);
+        let mut header = ColumnRenderable::new();
+        header.push(Line::from(
+            format!("Select Reasoning Level for {model_slug}").bold(),
+        ));
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
             header: Box::new(header),
@@ -2200,7 +2045,7 @@ impl ChatWidget {
                     tx.send(AppEvent::ShowWindowsAutoModeInstructions);
                 })]
             } else {
-                Self::approval_preset_actions(preset.approval, preset.sandbox.clone())
+                self.approval_preset_actions(preset.approval, preset.sandbox.clone())
             };
             items.push(SelectionItem {
                 name,
@@ -2222,14 +2067,16 @@ impl ChatWidget {
     }
 
     fn approval_preset_actions(
+        &self,
         approval: AskForApproval,
         sandbox: SandboxPolicy,
     ) -> Vec<SelectionAction> {
+        let provider_id = self.config.model_provider_id.clone();
         vec![Box::new(move |tx| {
             let sandbox_clone = sandbox.clone();
             tx.send(AppEvent::CodexOp(Op::OverrideTurnContext {
                 cwd: None,
-                provider_id: None,
+                provider_id: Some(provider_id.clone()),
                 approval_policy: Some(approval),
                 sandbox_policy: Some(sandbox_clone.clone()),
                 model: None,
@@ -2244,26 +2091,26 @@ impl ChatWidget {
     pub(crate) fn open_full_access_confirmation(&mut self, preset: ApprovalPreset) {
         let approval = preset.approval;
         let sandbox = preset.sandbox;
-        let title_line = Line::from(vec!["Enable full access?".bold()]);
+        let mut header_children: Vec<Box<dyn Renderable>> = Vec::new();
+        let title_line = Line::from("Enable full access?").bold();
         let info_line = Line::from(vec![
             "When Codex runs with full access, it can edit any file on your computer and run commands with network, without your approval. "
                 .into(),
             "Exercise caution when enabling full access. This significantly increases the risk of data loss, leaks, or unexpected behavior."
                 .fg(Color::Red),
         ]);
-        let header_children: Vec<Box<dyn Renderable>> = vec![
-            Box::new(title_line) as Box<dyn Renderable>,
-            Box::new(Paragraph::new(vec![info_line]).wrap(Wrap { trim: false }))
-                as Box<dyn Renderable>,
-        ];
-        let header = ColumnRenderable::new(header_children);
+        header_children.push(Box::new(title_line));
+        header_children.push(Box::new(
+            Paragraph::new(vec![info_line]).wrap(Wrap { trim: false }),
+        ));
+        let header = ColumnRenderable::with(header_children);
 
-        let mut accept_actions = Self::approval_preset_actions(approval, sandbox.clone());
+        let mut accept_actions = self.approval_preset_actions(approval, sandbox.clone());
         accept_actions.push(Box::new(|tx| {
             tx.send(AppEvent::UpdateFullAccessWarningAcknowledged(true));
         }));
 
-        let mut accept_and_remember_actions = Self::approval_preset_actions(approval, sandbox);
+        let mut accept_and_remember_actions = self.approval_preset_actions(approval, sandbox);
         accept_and_remember_actions.push(Box::new(|tx| {
             tx.send(AppEvent::UpdateFullAccessWarningAcknowledged(true));
             tx.send(AppEvent::PersistFullAccessWarningAcknowledged);
@@ -2430,6 +2277,13 @@ impl ChatWidget {
         let cell = history_cell::new_memory_suggestions(query, confidence_percent, entries);
         self.add_boxed_history(cell);
         self.request_redraw();
+    }
+
+    pub(crate) fn submit_text_message(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        self.submit_user_message(text.into());
     }
 
     pub(crate) fn add_info_message(&mut self, message: String, hint: Option<String>) {
@@ -2684,16 +2538,6 @@ impl ChatWidget {
         self.bottom_pane.show_view(Box::new(view));
     }
 
-    /// Programmatically submit a user text message as if typed in the
-    /// composer. The text will be added to conversation history and sent to
-    /// the agent.
-    pub(crate) fn submit_text_message(&mut self, text: String) {
-        if text.is_empty() {
-            return;
-        }
-        self.submit_user_message(text.into());
-    }
-
     pub(crate) fn token_usage(&self) -> TokenUsage {
         self.token_info
             .as_ref()
@@ -2719,94 +2563,33 @@ impl ChatWidget {
         self.token_info = None;
     }
 
-    pub fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
-        let [_, _, bottom_pane_area] = self.layout_areas(area);
-        self.bottom_pane.cursor_pos(bottom_pane_area)
+    fn as_renderable(&self) -> RenderableItem<'_> {
+        let active_cell_renderable = match &self.active_cell {
+            Some(cell) => RenderableItem::Borrowed(cell).inset(Insets::tlbr(1, 0, 0, 0)),
+            None => RenderableItem::Owned(Box::new(())),
+        };
+        let mut flex = FlexRenderable::new();
+        flex.push(1, active_cell_renderable);
+        flex.push(
+            0,
+            RenderableItem::Borrowed(&self.bottom_pane).inset(Insets::tlbr(1, 0, 0, 0)),
+        );
+        RenderableItem::Owned(Box::new(flex))
     }
 }
 
-fn reasoning_presets_for_kind(kind: ProviderKind) -> Vec<ReasoningEffortPreset> {
-    match kind {
-        ProviderKind::OpenAiResponses | ProviderKind::AnthropicClaude => vec![
-            ReasoningEffortPreset {
-                effort: ReasoningEffort::Minimal,
-                description: "Fastest responses with limited reasoning".to_string(),
-            },
-            ReasoningEffortPreset {
-                effort: ReasoningEffort::Low,
-                description: "Balances latency with moderate reasoning depth".to_string(),
-            },
-            ReasoningEffortPreset {
-                effort: ReasoningEffort::Medium,
-                description: "Recommended balance of speed and reasoning".to_string(),
-            },
-            ReasoningEffortPreset {
-                effort: ReasoningEffort::High,
-                description: "Maximize reasoning depth for complex tasks".to_string(),
-            },
-        ],
-        ProviderKind::Ollama => vec![ReasoningEffortPreset {
-            effort: ReasoningEffort::Minimal,
-            description: "Fast local generation (recommended)".to_string(),
-        }],
-    }
-}
-
-fn describe_custom_provider(provider: &CustomProvider) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    match provider.provider_kind {
-        ProviderKind::OpenAiResponses => parts.push("OpenAI-compatible endpoint".to_string()),
-        ProviderKind::Ollama => parts.push("Local Ollama provider".to_string()),
-        ProviderKind::AnthropicClaude => {
-            parts.push("Anthropic Claude-compatible endpoint".to_string())
-        }
-    }
-    if let Some(url) = provider.base_url.as_deref()
-        && !url.trim().is_empty()
-    {
-        parts.push(url.trim().to_string());
-    }
-    if let Some(models) = provider.cached_models.as_ref()
-        && !models.is_empty()
-    {
-        parts.push(format!("Cached models: {}", models.len()));
-    }
-    parts.join(" • ")
-}
-
-pub(crate) fn refresh_model_metadata(config: &mut Config) {
-    let family = find_family_for_model(&config.model)
-        .unwrap_or_else(|| derive_default_model_family(&config.model));
-    config.model_family = family;
-
-    if let Some(info) = get_model_info(&config.model_family) {
-        config.model_context_window = Some(info.context_window());
-        config.model_max_output_tokens = Some(info.max_output_tokens());
-        config.model_auto_compact_token_limit = info.auto_compact_token_limit;
-    } else {
-        config.model_context_window = None;
-        config.model_max_output_tokens = None;
-        config.model_auto_compact_token_limit = None;
-    }
-}
-
-impl WidgetRef for &ChatWidget {
-    fn render_ref(&self, area: Rect, buf: &mut Buffer) {
-        let [_, active_cell_area, bottom_pane_area] = self.layout_areas(area);
-        (&self.bottom_pane).render(bottom_pane_area, buf);
-        if !active_cell_area.is_empty()
-            && let Some(cell) = &self.active_cell
-        {
-            let mut area = active_cell_area;
-            area.y = area.y.saturating_add(1);
-            area.height = area.height.saturating_sub(1);
-            if let Some(exec) = cell.as_any().downcast_ref::<ExecCell>() {
-                exec.render_ref(area, buf);
-            } else if let Some(tool) = cell.as_any().downcast_ref::<McpToolCallCell>() {
-                tool.render_ref(area, buf);
-            }
-        }
+impl Renderable for ChatWidget {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        self.as_renderable().render(area, buf);
         self.last_rendered_width.set(Some(area.width as usize));
+    }
+
+    fn desired_height(&self, width: u16) -> u16 {
+        self.as_renderable().desired_height(width)
+    }
+
+    fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        self.as_renderable().cursor_pos(area)
     }
 }
 
@@ -2953,6 +2736,22 @@ pub(crate) fn show_review_commit_picker_with_entries(
         search_placeholder: Some("Type to search commits".to_string()),
         ..Default::default()
     });
+}
+
+pub(crate) fn refresh_model_metadata(config: &mut Config) {
+    let family = find_family_for_model(&config.model)
+        .unwrap_or_else(|| derive_default_model_family(&config.model));
+    config.model_family = family;
+
+    if let Some(info) = get_model_info(&config.model_family) {
+        config.model_context_window = Some(info.context_window());
+        config.model_max_output_tokens = Some(info.max_output_tokens());
+        config.model_auto_compact_token_limit = info.auto_compact_token_limit;
+    } else {
+        config.model_context_window = None;
+        config.model_max_output_tokens = None;
+        config.model_auto_compact_token_limit = None;
+    }
 }
 
 #[cfg(test)]

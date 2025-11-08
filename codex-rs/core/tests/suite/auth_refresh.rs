@@ -184,6 +184,7 @@ impl RefreshTokenTestContext {
             openai_api_key: None,
             tokens: Some(tokens),
             last_refresh: Some(initial_last_refresh),
+            custom_providers: None,
         };
         save_auth(
             codex_home.path(),
